@@ -1,15 +1,16 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from collections.abc import Callable, Mapping
+from typing import TYPE_CHECKING, Any, Protocol, TypeVar, cast
 
-from ._errors import Ok, Result
-from ._stream import token_counts
+from ._errors import Err, Ok, Result
+from ._stream import AsyncChatStream, ChatStream, token_counts
 from ._transport import Call, new_idempotency_key
 
 if TYPE_CHECKING:
     from .types import ChatCompletion, ChatParams, ModelList
 
+T = TypeVar('T')
 CHAT_PATH = '/v1/chat/completions'
 MODELS_CALL = Call('GET', '/v1/models')
 
@@ -17,9 +18,13 @@ MODELS_CALL = Call('GET', '/v1/models')
 class JsonTransport(Protocol):
     def json(self, call: Call) -> Result[Any]: ...
 
+    def open(self, call: Call) -> Result[Any]: ...
+
 
 class AsyncJsonTransport(Protocol):
     async def json(self, call: Call) -> Result[Any]: ...
+
+    async def open(self, call: Call) -> Result[Any]: ...
 
 
 def chat_body(params: Mapping[str, Any], stream: bool) -> dict[str, Any]:
@@ -43,6 +48,16 @@ def chat_call(params: Mapping[str, Any], idempotency_key: str | None) -> Call:
     )
 
 
+def stream_call(params: Mapping[str, Any], idempotency_key: str | None) -> Call:
+    # [1] chat_body asks for the usage chunk, so stream.usage is filled (the engine sends it only on include_usage)
+    return Call('POST', CHAT_PATH, body=chat_body(params, True), headers=idempotency(idempotency_key))
+
+
+def stream_result(opened: Result[Any], make: Callable[[Any], T]) -> Result[T]:
+    # [2] A refusal before any byte is an error value; otherwise the stream
+    return Err(opened.error) if opened.error is not None else Ok(make(opened.data))
+
+
 def with_counts(result: Result[Any]) -> Result[Any]:
     if result.error is not None:
         return result
@@ -57,6 +72,9 @@ class ChatApi:
 
     def create(self, params: ChatParams, *, idempotency_key: str | None = None) -> Result[ChatCompletion]:
         return with_counts(self._transport.json(chat_call(params, idempotency_key)))
+
+    def stream(self, params: ChatParams, *, idempotency_key: str | None = None) -> Result[ChatStream]:
+        return stream_result(self._transport.open(stream_call(params, idempotency_key)), ChatStream)
 
 
 class ModelsApi:
@@ -73,6 +91,9 @@ class AsyncChatApi:
 
     async def create(self, params: ChatParams, *, idempotency_key: str | None = None) -> Result[ChatCompletion]:
         return with_counts(await self._transport.json(chat_call(params, idempotency_key)))
+
+    async def stream(self, params: ChatParams, *, idempotency_key: str | None = None) -> Result[AsyncChatStream]:
+        return stream_result(await self._transport.open(stream_call(params, idempotency_key)), AsyncChatStream)
 
 
 class AsyncModelsApi:

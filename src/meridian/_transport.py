@@ -197,7 +197,8 @@ class SyncTransport:
             response, error, retry_after = self._attempt(call)
             if response is not None:
                 return Ok(response)
-            assert error is not None
+            if error is None:  # unreachable, but never an assert: python -O must still not raise
+                return Err(client_error('network_error', 'The request failed.'))
             wait = next_wait(tried, error, retry_after, call, self._shared.max_retries)
             if wait is None:
                 return Err(error)
@@ -276,7 +277,8 @@ class AsyncTransport:
             response, error, retry_after = await self._attempt(call)
             if response is not None:
                 return Ok(response)
-            assert error is not None
+            if error is None:  # unreachable, but never an assert: python -O must still not raise
+                return Err(client_error('network_error', 'The request failed.'))
             wait = next_wait(tried, error, retry_after, call, self._shared.max_retries)
             if wait is None:
                 return Err(error)
