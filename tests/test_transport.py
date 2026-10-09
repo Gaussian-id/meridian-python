@@ -1,3 +1,4 @@
+import json
 from typing import Any
 
 import pytest
@@ -107,7 +108,7 @@ def test_a_call_that_is_not_safe_to_repeat_retries_only_rate_limited() -> None:
     from meridian._transport import Call, next_wait
 
     def err(code: str, status: int) -> Any:
-        body = '{"error":{"message":"m","type":"api_error","code":"%s","request_id":"r"}}' % code
+        body = json.dumps({'error': {'message': 'm', 'type': 'api_error', 'code': code, 'request_id': 'r'}})
         return error_from_body(status, 'r', body)
 
     unsafe = Call('POST', '/x', retry=False)
