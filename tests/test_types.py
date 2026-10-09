@@ -7,7 +7,13 @@ from typing import get_args
 
 from typing_extensions import get_type_hints, is_typeddict
 
+from tests.support.spec import admin_document, reachable_schemas, wrapped_operations
+
 ROOT = Path(__file__).resolve().parents[1]
+# A price or a rate the operator earns on: none of it may appear in a type an integrator sees (D-27)
+PRICED_KEY = re.compile(
+    'cost|price|per_million|recovery_rate|write_off_rate|bleed|revenue|uncollected|written_off', re.IGNORECASE
+)
 
 
 def test_spec_source_records_the_engine_commit() -> None:
@@ -42,10 +48,30 @@ def test_generated_admin_types_carry_no_price_or_cost_field() -> None:
     for value in vars(admin).values():
         _walk(value, seen, keys, classes)
     assert keys and classes, 'the generated admin module has no TypedDicts'
-    assert [k for k in keys if re.search('cost|price|per_million', k, re.IGNORECASE)] == []
+    assert [k for k in keys if PRICED_KEY.search(k)] == []
     assert [c for c in classes if re.search('price|cost', c, re.IGNORECASE)] == []
     text = (ROOT / 'src' / 'meridian' / '_generated' / 'admin.py').read_text(encoding='utf-8')
     assert not re.search('per_million|SupplierPrice', text, re.IGNORECASE)
+
+
+def test_generated_admin_types_come_only_from_the_wrapped_operations() -> None:
+    from meridian._generated import admin
+
+    wrapped = list(wrapped_operations().values())
+    assert len(wrapped) == 21
+    schemas = admin_document()['components']['schemas']
+    expected = {
+        name
+        for name in reachable_schemas(wrapped)
+        if schemas[name].get('type') == 'object' and not re.search('cost|price', name, re.IGNORECASE)
+    }
+    seen: set[int] = set()
+    classes: list[str] = []
+    for value in vars(admin).values():
+        _walk(value, seen, [], classes)
+    assert sorted(classes) == sorted(expected)
+    # The operator-only (Platform*) shapes and the supplier catalogue are gone, with their rates and revenue
+    assert [c for c in classes if c.startswith(('Platform', 'Supplier'))] == []
 
 
 def test_generated_public_types_cover_the_chat_shapes() -> None:

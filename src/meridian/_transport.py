@@ -37,8 +37,9 @@ BASE_DELAY = 0.5
 MAX_JITTER = 0.25
 MAX_RETRY_AFTER = 30.0
 _SECONDS = re.compile(r'\d+(?:\.\d+)?')
-# What building or sending a request may raise that becomes an Err (RecursionError: params too deep to encode)
-_SEND_ERRORS = (httpx.HTTPError, httpx.InvalidURL, UnicodeError, RecursionError)
+# What building or sending a request may raise that becomes an Err: a body or URL that cannot be encoded (TypeError,
+# ValueError, which includes UnicodeError), params too deep to encode (RecursionError)
+_SEND_ERRORS = (httpx.HTTPError, httpx.InvalidURL, TypeError, ValueError, RecursionError)
 
 
 @dataclass(frozen=True)
@@ -48,8 +49,10 @@ class Call:
     query: Mapping[str, str | int | None] | None = None
     body: Any = _NO_BODY
     headers: Mapping[str, str] = field(default_factory=lambda: {})
-    retry: bool = True  # False: not safe to repeat once it may have reached the server
+    # True: repeating the call is harmless although it is a write with no idempotency key (see `may_repeat`)
+    repeatable: bool = False
     object_body: bool = False  # True: a 2xx body that is not a JSON object is a transport failure
+    no_content: bool = False  # True: the operation answers 204 with no body (a DELETE); no other call accepts a 204
 
 
 def new_idempotency_key() -> str:
@@ -74,12 +77,26 @@ def retry_after_seconds(value: str | None) -> float | None:
     return seconds if seconds > 0 else None
 
 
+def may_repeat(call: Call) -> bool:
+    """Whether a call that may have reached the server may be sent again. The one place this is decided.
+
+    A read or a delete can be repeated; so can any call that carries an idempotency key (the engine replays it) or is
+    marked `repeatable`. Every other call (a write the engine would run twice) is safe by default: it is repeated only
+    after a rate limit, which means the engine did not run it.
+    """
+    return (
+        call.repeatable
+        or call.method.upper() in ('GET', 'DELETE')
+        or any(name.lower() == 'idempotency-key' for name in call.headers)
+    )
+
+
 def next_wait(tried: int, error: MeridianError, retry_after: str | None, call: Call, max_retries: int) -> float | None:
     """Seconds to wait before the next attempt, or None to stop and return the error."""
     # [1] A final error, a spent budget, or a call unsafe to repeat (unless the server refused it before running it)
     if not error.retryable or tried >= max_retries:
         return None
-    if not call.retry and error.code != 'rate_limited':
+    if not may_repeat(call) and error.code != 'rate_limited':
         return None
 
     # [2] A server asking for a long wait gets its answer now
@@ -126,7 +143,9 @@ class _Shared:
         )
 
     def failure(self, exc: BaseException) -> MeridianError:
-        if not isinstance(exc, httpx.HTTPError):  # a URL or header httpx cannot encode: our setup, not the wire
+        if isinstance(exc, UnicodeError):  # the message would quote a character of the request, maybe of a secret
+            return config_error('The request could not be built: it holds text that cannot be encoded.')
+        if not isinstance(exc, httpx.HTTPError):  # a URL, header or body httpx cannot encode: our setup, not the wire
             return config_error(f'The request could not be built: {exc}')
         if isinstance(exc, httpx.TimeoutException):
             return client_error('network_error', f'No response within {self.timeout:g} s.')
@@ -143,14 +162,24 @@ class _Shared:
         return Err(client_error('network_error', message, response.status_code))
 
     @staticmethod
+    def no_content(call: Call, response: httpx.Response) -> Result[Any]:
+        """A 204: nothing to read, and an answer only for the call that expects it."""
+        if call.no_content:
+            return Ok(None, request_id=response.headers.get('x-request-id'))
+        message = 'The engine answered with no content, which this call does not expect.'
+        return Err(client_error('network_error', message, response.status_code))
+
+    @staticmethod
     def decode(call: Call, response: httpx.Response, text: str) -> Result[Any]:
         try:
             data: Any = json.loads(text)
         except (ValueError, RecursionError):  # RecursionError: nested deeper than the parser allows
             return Err(client_error('network_error', 'The response was not valid JSON.', response.status_code))
+        if data is None:  # a literal null is nothing: no call takes it for a result
+            return Err(client_error('network_error', 'The response was empty (JSON null).', response.status_code))
         if call.object_body and not isinstance(data, dict):
             return Err(client_error('network_error', 'The response was not a JSON object.', response.status_code))
-        return Ok[Any](data, request_id=response.headers.get('x-request-id'))
+        return Ok[Any](None if call.no_content else data, request_id=response.headers.get('x-request-id'))
 
 
 class SyncTransport:
@@ -213,9 +242,9 @@ class SyncTransport:
             return opened
         response = opened.data
         try:
-            # [2] No content is None data
+            # [2] No content: None for the call that expects it, a failure for every other
             if response.status_code == 204:
-                return Ok(None)
+                return self._shared.no_content(call, response)
 
             # [3] A body that drops mid-read, or is not JSON, is a transport failure
             try:
@@ -293,9 +322,9 @@ class AsyncTransport:
             return opened
         response = opened.data
         try:
-            # [2] No content is None data
+            # [2] No content: None for the call that expects it, a failure for every other
             if response.status_code == 204:
-                return Ok(None)
+                return self._shared.no_content(call, response)
 
             # [3] A body that drops mid-read, or is not JSON, is a transport failure
             try:

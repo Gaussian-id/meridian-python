@@ -7,6 +7,7 @@ from tests.support.fake_engine import Scripted, completion, engine_error
 from tests.support.modes import make_client, resolve
 
 MSG: Any = [{'role': 'user', 'content': 'hi'}]
+NO_HEADERS: dict[str, str] = {}
 pytestmark = [pytest.mark.anyio, pytest.mark.fake_only]
 
 
@@ -111,9 +112,42 @@ def test_a_call_that_is_not_safe_to_repeat_retries_only_rate_limited() -> None:
         body = json.dumps({'error': {'message': 'm', 'type': 'api_error', 'code': code, 'request_id': 'r'}})
         return error_from_body(status, 'r', body)
 
-    unsafe = Call('POST', '/x', retry=False)
+    unsafe = Call('POST', '/x')
     assert next_wait(0, err('upstream_unavailable', 502), None, unsafe, 2) is None
     assert next_wait(0, err('rate_limited', 429), '1', unsafe, 2) == 1.0
+
+
+@pytest.mark.parametrize(
+    ('call', 'repeats'),
+    [
+        pytest.param(('GET', NO_HEADERS, False), True, id='get'),
+        pytest.param(('DELETE', NO_HEADERS, False), True, id='delete'),
+        pytest.param(('POST', NO_HEADERS, False), False, id='post'),
+        pytest.param(('PUT', NO_HEADERS, False), False, id='put'),
+        pytest.param(('PATCH', NO_HEADERS, False), False, id='patch'),
+        pytest.param(('post', NO_HEADERS, False), False, id='lowercase-post'),
+        pytest.param(('CUSTOM', NO_HEADERS, False), False, id='unknown-method'),
+        pytest.param(('POST', NO_HEADERS, True), True, id='post-marked-repeatable'),
+        pytest.param(('PATCH', NO_HEADERS, True), True, id='patch-marked-repeatable'),
+        pytest.param(('POST', {'idempotency-key': 'k'}, False), True, id='post-with-idempotency-key'),
+        pytest.param(('POST', {'Idempotency-Key': 'k'}, False), True, id='post-with-idempotency-key-any-case'),
+    ],
+)
+def test_whether_a_failure_is_retried_is_derived_from_the_call(
+    call: tuple[str, dict[str, str], bool], repeats: bool
+) -> None:
+    from meridian._errors import error_from_body
+    from meridian._transport import Call, next_wait
+
+    method, headers, repeatable = call
+    sent = Call(method, '/x', headers=headers, repeatable=repeatable)
+    for code, status in (('upstream_unavailable', 502), ('service_unavailable', 503), ('deadline_exceeded', 504)):
+        body = json.dumps({'error': {'message': 'm', 'type': 'api_error', 'code': code, 'request_id': 'r'}})
+        assert (next_wait(0, error_from_body(status, 'r', body), None, sent, 2) is not None) is repeats
+    limited = error_from_body(
+        429, 'r', json.dumps({'error': {'message': 'm', 'type': 'rate_limit_error', 'code': 'rate_limited'}})
+    )
+    assert next_wait(0, limited, '1', sent, 2) == 1.0
 
 
 async def test_cancellation_during_the_backoff_propagates(engine: Any, monkeypatch: pytest.MonkeyPatch) -> None:

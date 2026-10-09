@@ -9,44 +9,6 @@ from typing import Literal, TypeAlias
 
 from typing_extensions import NotRequired, TypedDict
 
-AccountStatusName: TypeAlias = Literal['active', 'suspended']
-
-
-AdvanceOnboarding = TypedDict(
-    'AdvanceOnboarding',
-    {
-        'from': str,
-    },
-)
-
-
-class AuditEventBody(TypedDict):
-    action: str
-    actor_email: str
-    actor_id: str
-    actor_kind: str
-    created_at: str
-    id: str
-    reason: str | None
-    target_id: str
-    target_type: str
-
-
-class AuditPage(TypedDict):
-    actions: list[AuditEventBody]
-
-
-class ChangeRole(TypedDict):
-    role_id: str
-
-
-class ControlBody(TypedDict):
-    action: str
-    locked_until: str | None
-    status: str
-    target_id: str
-    target_type: str
-
 
 class CreateOrganisation(TypedDict):
     external_reference: NotRequired[str | None]
@@ -107,39 +69,11 @@ class ErrorEnvelope(TypedDict):
     error: ErrorBody
 
 
-class IntegratorBody(TypedDict):
-    active: bool
-    created_at: str
-    expires_at: str | None
-    id: str
-    last_used_at: str | None
-    name: str
-    prefix: str
-
-
-class InviteMember(TypedDict):
-    email: str
-    role_id: str
-
-
-class IssueIntegrator(TypedDict, closed=True):
-    expires_in_days: NotRequired[int | None]
-    name: str
-
-
 class IssueKey(TypedDict):
     expires_in_days: NotRequired[int | None]
     name: NotRequired[str | None]
     rate_limit_per_day: NotRequired[int | None]
     rate_limit_per_minute: NotRequired[int | None]
-
-
-class IssuedIntegrator(TypedDict):
-    credential: str
-    expires_at: str | None
-    id: str
-    name: str
-    prefix: str
 
 
 class IssuedKey(TypedDict):
@@ -173,18 +107,6 @@ class LogRow(TypedDict):
     tokens_out: int | None
 
 
-class MeBody(TypedDict):
-    created_at: str
-    display_name: str | None
-    email: str
-    id: str
-    platform_admin: bool
-    status: AccountStatusName
-
-
-MembershipStatusName: TypeAlias = Literal['active', 'invited']
-
-
 class ModelAllowlist(TypedDict, closed=True):
     models: list[str]
 
@@ -202,61 +124,12 @@ class ModelPerformance(TypedDict):
     tokens: int | None
 
 
-OnboardingStepName: TypeAlias = Literal[
-    'welcome', 'survey', 'profile', 'create_org', 'create_project', 'api_key', 'finish'
-]
-
-
-class ParkedUsageBody(TypedDict):
-    event_id: str
-    parked_at: str
-    reason: str | None
-    status: int | None
-
-
-class ParkedUsagePage(TypedDict):
-    events: list[ParkedUsageBody]
-
-
-class RenameOrganisation(TypedDict, closed=True):
-    name: str
-
-
-class RequeuedBody(TypedDict):
-    requeued: int
-
-
 ResourceStatusName: TypeAlias = Literal['active', 'suspended', 'locked']
-
-
-RoleName: TypeAlias = Literal['owner', 'admin', 'developer']
 
 
 class SetCredential(TypedDict, closed=True):
     credential: str
     policy: NotRequired[CredentialPolicy | None]
-
-
-class SuperadminBody(TypedDict):
-    superadmin: bool
-
-
-class SupplierCapabilities(TypedDict):
-    json_output: bool
-    streaming: bool
-    tools: bool
-    vision: bool
-
-
-SupplierDelivery: TypeAlias = Literal['direct', 'openrouter']
-
-
-class SupplierLimits(TypedDict):
-    context_tokens: int
-    max_output_tokens: int
-
-
-SupplierRoutingClass: TypeAlias = Literal['light', 'standard', 'advanced']
 
 
 class TimeRange(TypedDict):
@@ -305,24 +178,6 @@ class LogPage(TypedDict):
     next_cursor: str | None
 
 
-class MemberBody(TypedDict):
-    created_at: str
-    display_name: str | None
-    email: str | None
-    id: str
-    org_id: str
-    role_id: RoleName
-    status: MembershipStatusName
-    user_id: str
-
-
-class OnboardingBody(TypedDict):
-    completed_steps: list[OnboardingStepName]
-    current_step: OnboardingStepName | None
-    onboarding_completed: bool
-    workspace_disposition: str
-
-
 class OrganisationBody(TypedDict):
     created_at: str
     id: str
@@ -332,84 +187,6 @@ class OrganisationBody(TypedDict):
     slug: str
     status: ResourceStatusName
     updated_at: str
-
-
-class PlatformMembershipBody(TypedDict):
-    org_id: str
-    org_name: str
-    role: RoleName
-
-
-class PlatformOrgBody(TypedDict):
-    bleed: int
-    created_at: str
-    id: str
-    last_activity: str | None
-    member_count: int
-    name: str
-    plan: str
-    project_count: int
-    recovery_rate: int
-    requests: int
-    revenue: int
-    slug: str
-    status: ResourceStatusName
-    tokens: int | None
-    uncollected: int
-    write_off_rate: int
-    written_off: int
-
-
-class PlatformOrgsPage(TypedDict):
-    incomplete: bool
-    orgs: list[PlatformOrgBody]
-
-
-class PlatformProjectBody(TypedDict):
-    bleed: int
-    created_at: str
-    id: str
-    key_count: int
-    last_activity: str | None
-    name: str
-    org_id: str
-    org_name: str
-    plan: str
-    recovery_rate: int
-    requests: int
-    revenue: int
-    status: ResourceStatusName
-    tokens: int | None
-    uncollected: int
-    write_off_rate: int
-    written_off: int
-
-
-class PlatformProjectDetail(TypedDict):
-    project: PlatformProjectBody
-
-
-class PlatformProjectsPage(TypedDict):
-    incomplete: bool
-    projects: list[PlatformProjectBody]
-
-
-class PlatformUserBody(TypedDict):
-    active: bool
-    created_at: str
-    deletion_status: str | None
-    email: str
-    id: str
-    last_active_api: str | None
-    last_active_console: str | None
-    onboarding_completed: bool
-    orgs: list[PlatformMembershipBody]
-    username: str
-
-
-class PlatformUsersPage(TypedDict):
-    total: int
-    users: list[PlatformUserBody]
 
 
 class ProjectBody(TypedDict):
@@ -422,33 +199,7 @@ class ProjectBody(TypedDict):
     status: ResourceStatusName
 
 
-class RoleBody(TypedDict):
-    id: RoleName
-    name: RoleName
-    permissions: list[str]
-
-
-class SupplierModelResponse(TypedDict):
-    capabilities: SupplierCapabilities
-    delivery: SupplierDelivery
-    id: str
-    limits: SupplierLimits
-    provider: str
-    routing_class: NotRequired[SupplierRoutingClass | None]
-
-
 class UsageReport(TypedDict):
     model_performance: list[ModelPerformance]
     summary: UsageSummaryBody
     time_range: TimeRange
-
-
-class PlatformOrgDetail(TypedDict):
-    org: PlatformOrgBody
-    projects: list[PlatformProjectBody]
-    projects_incomplete: bool
-
-
-class SupplierCatalogueResponse(TypedDict):
-    models: list[SupplierModelResponse]
-    version: int

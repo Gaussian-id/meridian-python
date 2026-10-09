@@ -3,7 +3,7 @@ from typing import Any
 import httpx
 import pytest
 
-from meridian import Meridian, MeridianError, Ok
+from meridian import AsyncMeridian, Meridian, MeridianError, Ok
 from meridian._errors import error_from_body
 from tests.support.fake_engine import Scripted, completion
 
@@ -32,6 +32,36 @@ def test_a_2xx_body_that_is_not_an_object_is_a_network_error(body: str, engine: 
     result = Meridian(engine.public_url, engine.project_key, transport=engine.transport).chat.create({'messages': MSG})
     assert result.error is not None
     assert (result.error.code, result.error.status) == ('network_error', 200)
+
+
+@pytest.mark.parametrize('status', [200, 201])
+@pytest.mark.parametrize('body', ['null', ' null\n'])
+def test_a_literal_null_models_reply_is_a_network_error(status: int, body: str, engine: Any) -> None:
+    engine.next(Scripted(status=status, text=body, headers={'content-type': 'application/json'}))
+    result = Meridian(engine.public_url, engine.project_key, transport=engine.transport).models.list()
+    assert result.error is not None
+    assert (result.error.code, result.error.type, result.error.status) == ('network_error', 'client_error', status)
+
+
+@pytest.mark.parametrize('call', ['chat', 'models'])
+def test_a_204_where_a_body_is_expected_is_a_network_error_never_ok_none(call: str, engine: Any) -> None:
+    engine.next(Scripted(status=204))
+    client = Meridian(engine.public_url, engine.project_key, transport=engine.transport)
+    result = client.chat.create({'messages': MSG}) if call == 'chat' else client.models.list()
+    assert result.error is not None
+    assert (result.error.code, result.error.status) == ('network_error', 204)
+    assert len(engine.requests) == 1
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize('call', ['chat', 'models'])
+async def test_a_204_and_a_null_are_network_errors_when_async_too(call: str, engine: Any) -> None:
+    client = AsyncMeridian(engine.public_url, engine.project_key, transport=engine.transport)
+    for scripted in (Scripted(status=204), Scripted(text='null', headers={'content-type': 'application/json'})):
+        engine.next(scripted)
+        result = await (client.chat.create({'messages': MSG}) if call == 'chat' else client.models.list())
+        assert result.error is not None
+        assert result.error.code == 'network_error'
 
 
 def test_an_unknown_code_with_a_5xx_status_is_internal_and_not_retryable() -> None:
