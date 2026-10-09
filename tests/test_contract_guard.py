@@ -1,8 +1,11 @@
+import functools
 import json
 import os
 import shutil
 import subprocess
 import sys
+import tempfile
+import unicodedata
 import urllib.request
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -29,6 +32,7 @@ ROOT = Path(__file__).resolve().parents[1]
 GEMINI = 'GAUSSMERIDIAN_GEMINI_API_KEY'
 OPENROUTER = 'GAUSSMERIDIAN_OPENROUTER_API_KEY'
 SECRET = 'v' + 'q' * 24  # a stand-in value, built at run time; no message may ever contain it
+REAL_REGISTRY = getattr(urllib.request, 'getproxies_registry', None)  # before any test replaces it
 
 
 @pytest.fixture(autouse=True)
@@ -84,6 +88,11 @@ TEXTS: list[tuple[str, list[str]]] = [
     ('GAUSSMERIDIAN_GEMINI_API_KEY= ', [GEMINI]),
     ('GAUSSMERIDIAN_GEMINI_API_KEY=\t', [GEMINI]),
     ('GAUSSMERIDIAN_GEMINI_API_KEY=   \r\n', [GEMINI]),
+    # both local-up readers strip only double quotes, so two single quotes are a two-character value
+    ("GAUSSMERIDIAN_GEMINI_API_KEY=''", [GEMINI]),
+    ("export GAUSSMERIDIAN_GEMINI_API_KEY=''", [GEMINI]),
+    ("GAUSSMERIDIAN_GEMINI_API_KEY\t:''", [GEMINI]),
+    (f"{GEMINI}=\n{OPENROUTER}=''\n", [OPENROUTER]),
     # anything but exactly an empty assignment counts, wherever the name is on the line
     ("GAUSSMERIDIAN_GEMINI_API_KEY=''  # empty", [GEMINI]),
     ('set "GAUSSMERIDIAN_GEMINI_API_KEY="', [GEMINI]),
@@ -96,11 +105,16 @@ TEXTS: list[tuple[str, list[str]]] = [
     ('REM set GAUSSMERIDIAN_GEMINI_API_KEY=abc', [GEMINI]),
     ('XGAUSSMERIDIAN_GEMINI_API_KEY=abc', [GEMINI]),
     ('GAUSSMERIDIAN_GEMINI_API_KEY_OTHER=abc', [GEMINI]),
-    # letters that fold to the name's letters (Kelvin sign, long s); compose matches names without case
-    ('GAUSSMERIDIAN_GEMINI_API_\N{KELVIN SIGN}EY=VAL', [GEMINI]),
-    ('GAUS\N{LATIN SMALL LETTER LONG S}MERIDIAN_GEMINI_API_KEY=VAL', [GEMINI]),
-    ('GAUSSMERIDIAN_GEMINI_API_\N{KELVIN SIGN}EY=', []),
-    # a character some reader skips, folds away or breaks a line at: neither name can be checked
+    # anything outside printable ASCII and tab, anywhere in the file: neither name can be checked. Some reader folds
+    # it to a name's letter (Kelvin sign, long s, dotted capital I), skips it (marks, tatweel), or breaks a line at it.
+    ('GAUSSMERIDIAN_GEMINI_API_\N{KELVIN SIGN}EY=VAL', BOTH),
+    ('GAUS\N{LATIN SMALL LETTER LONG S}MERIDIAN_GEMINI_API_KEY=VAL', BOTH),
+    ('GAUSSMERIDIAN_GEMINI_API_\N{KELVIN SIGN}EY=', BOTH),
+    ('GAUSSMER\N{LATIN CAPITAL LETTER I WITH DOT ABOVE}DIAN_GEMINI_API_KEY=VAL', BOTH),
+    ('GAUSS\N{ARABIC TATWEEL}MERIDIAN_GEMINI_API_KEY=VAL', BOTH),
+    ('GAUSSMERIDIAN_GEMINI_API_KEY\N{HEBREW ACCENT ETNAHTA}=VAL', BOTH),
+    ('A=caf\N{LATIN SMALL LETTER E WITH ACUTE}\n', BOTH),
+    ('# \N{LATIN SMALL LETTER E WITH ACUTE}\n', BOTH),
     ('A=1\rGAUSSMERIDIAN_GEMINI_API_KEY=abc\rB=2', BOTH),
     ('GAUSSMERIDIAN_GEMINI_API_KEY=   \rVAL', BOTH),
     ('GAUSSMERIDIAN_GEMINI_API_KEY=\rVAL', BOTH),
@@ -131,7 +145,6 @@ TEXTS: list[tuple[str, list[str]]] = [
     ('\t# GAUSSMERIDIAN_GEMINI_API_KEY=abc', []),
     ('GAUSSMERIDIAN_GEMINI_API_KEY=', []),
     ('GAUSSMERIDIAN_GEMINI_API_KEY=""', []),
-    ("GAUSSMERIDIAN_GEMINI_API_KEY=''", []),
     ('gaussmeridian_gemini_api_key=', []),
     ('set GAUSSMERIDIAN_GEMINI_API_KEY=', []),
     ('export GAUSSMERIDIAN_GEMINI_API_KEY=', []),
@@ -146,7 +159,8 @@ TEXTS: list[tuple[str, list[str]]] = [
     (f'{GEMINI}=\n{OPENROUTER}=""\n', []),
     ('A=""\nGAUSSMERIDIAN_GEMINI_API_KEY=""\n# GAUSSMERIDIAN_GEMINI_API_KEY=abc', []),
     ('A="x\n# GAUSSMERIDIAN_GEMINI_API_KEY=VAL\n"', []),
-    ('GAUSSMER\N{LATIN SMALL LETTER DOTLESS I}DIAN_GEMINI_API_KEY=VAL', []),  # no reader folds it to I
+    ("A='x\n# GAUSSMERIDIAN_GEMINI_API_KEY=VAL\n'", []),
+    ('A=1\tB=~ !"#$%&()*+,-./:;<>?@[\\]^_`{|}\n', []),
     ('GAUSSMERIDIAN_DB_PASSWORD=abc', []),
     ('', []),
 ]
@@ -162,18 +176,24 @@ HIDING = [
     *'\u2000\u200a\u200b\u200f\u202a\u202e\u202f\u2028\u2029\u205f\u2060\u2064\u206f\u3000\u3164\ufe00\ufe0f',
     *'\ufeff\uffa0\ufff0\ufff9\U0001bca0\U0001d173\U000e0001\U000e0020\U000e0100\U000e0fff',
     '\r',
+    # what the culture-sensitive StartsWith of local-common.ps1 skips (ICU), or what folds to a name's letter
+    *'\x00\u0300\u0591\u0640\u07fa\u180a\u1cd3\ufe73\u0903\u20dd\u0130\u0131\u017f\u212a\u00e9\u4e2d\U0001f600',
 ]
 
 
 @pytest.mark.parametrize('char', HIDING, ids=[f'U+{ord(c):04X}' for c in HIDING])
-def test_a_hiding_character_anywhere_means_neither_name_can_be_checked(char: str) -> None:
+def test_a_character_outside_printable_ascii_anywhere_means_neither_name_can_be_checked(char: str) -> None:
     assert paid_keys_in(f'A=1\n# a note{char}x\nB=2\n') == BOTH
     assert paid_keys_in(f'{GEMINI}{char}=\n') == BOTH
 
 
-@pytest.mark.parametrize('char', ['\t', '\n', '\u00e9', '\u0131', '\u212a', '\u4e2d', '\U0001f600'])
-def test_other_characters_do_not_stop_the_check(char: str) -> None:
+PRINTABLE = '\t' + ''.join(map(chr, range(0x20, 0x7F)))
+
+
+@pytest.mark.parametrize('char', PRINTABLE, ids=[f'U+{ord(c):04X}' for c in PRINTABLE])
+def test_printable_ascii_and_tab_do_not_stop_the_check(char: str) -> None:
     assert paid_keys_in(f'A=1{char}\n# a note {char}\n{GEMINI}=\n') == []
+    assert paid_keys_in(f'{GEMINI}={char}\n') == [GEMINI]
 
 
 # The security reviewer's probes (fake values): every one is set for compose or for a local-up reader, except the
@@ -237,7 +257,54 @@ REVIEW_FIXTURES = {
     '26-interp': f'{GEMINI}=${{UNSET_THING:-FAKEVAL26}}\n',
     '27-ref': f'X=FAKEVAL27\n{GEMINI}=$X\n',
 }
-NOT_SET_FOR_ANY_READER = {'b03-dotless-i'}
+# The third round (fake values): two single quotes are a value for both local-up readers; Windows compose matches a
+# dotted capital I to I; the culture-sensitive StartsWith skips marks and a few letters (U+0640, U+07FA, U+FE73) and
+# punctuation (U+180A, U+1CD3)
+SQ = "''"
+DOTTED = '\N{LATIN CAPITAL LETTER I WITH DOT ABOVE}'
+DB = 'GAUSSMERIDIAN_DB_USERNAME=fakeuser\nGAUSSMERIDIAN_DB_PASSWORD=fakepw\n'
+ROUND_3 = {
+    'r3-sq-G': f'{GEMINI}={SQ}\n',
+    'r3-sq-O': f'{OPENROUTER}={SQ}\n',
+    'r3-sq-both': f'{GEMINI}={SQ}\n{OPENROUTER}={SQ}\n',
+    'r3-sq-kelvin': f'GAUSSMERIDIAN_GEMINI_API_\N{KELVIN SIGN}EY={SQ}\n',
+    'r3-sq-export': f'export {GEMINI}={SQ}\n',
+    'r3-sq-set': f'set {GEMINI}={SQ}\n',
+    'r3-sq-colon': f'{GEMINI}:{SQ}\n',
+    'r3-sq-tab': f'{GEMINI}\t={SQ}\n',
+    'r3-sq-lower': f'{GEMINI.lower()}={SQ}\n',
+    'r3-sq-then-empty': f'{GEMINI}={SQ}\n{GEMINI}=\n',
+    'r3-empty-then-sq': f'{GEMINI}=\n{GEMINI}={SQ}\n',
+    'r3-sq-comment': f'{GEMINI}={SQ} # c\n',
+    'r3-chain-sq-dotted': f'{DB}{OPENROUTER}={SQ}\nGAUSSMER{DOTTED}DIAN_GEMINI_API_KEY=FAKER3A\n',
+    'r3-chain-icu-dotted': f'{DB}GAUSS\N{ARABIC TATWEEL}MERIDIAN_OPENROUTER_API_KEY=\n'
+    f'GAUSSMER{DOTTED}DIAN_GEMINI_API_KEY=FAKER3B\n',
+    'r3-chain-dotted-lower': f'{DB}gaussmer{DOTTED}dian_gemini_api_key=FAKER3C\n',
+    'r3-chain-all-dotted': f'{DB}{OPENROUTER}={SQ}\n{GEMINI.replace("I", DOTTED)}=FAKER3D\n',
+    'r3-export-dotted': f'{OPENROUTER}={SQ}\nexport GAUSSMER{DOTTED}DIAN_GEMINI_API_KEY=FAKER3E\n',
+    'r3-dotted-colon': f'{OPENROUTER}={SQ}\nGAUSSMER{DOTTED}DIAN_GEMINI_API_KEY: FAKER3F\n',
+    'r3-tatweel-val': 'GAUSS\N{ARABIC TATWEEL}MERIDIAN_GEMINI_API_KEY=FAKER3G\n',
+    'r3-fe73-val': 'GAUSS\N{ARABIC TAIL FRAGMENT}MERIDIAN_GEMINI_API_KEY=FAKER3H\n',
+    'r3-07fa-val': 'GAUSS\N{NKO LAJANYALAN}MERIDIAN_GEMINI_API_KEY=FAKER3I\n',
+    'r3-180a-val': 'GAUSS\N{MONGOLIAN NIRUGU}MERIDIAN_GEMINI_API_KEY=FAKER3J\n',
+    'r3-1cd3-val': 'GAUSS\N{VEDIC SIGN NIHSHVASA}MERIDIAN_GEMINI_API_KEY=FAKER3K\n',
+    'r3-0591-val': 'GAUSS\N{HEBREW ACCENT ETNAHTA}MERIDIAN_GEMINI_API_KEY=FAKER3L\n',
+    'r3-mark-in-multiline': 'A="\nGAUSS\N{HEBREW ACCENT ETNAHTA}MERIDIAN_OPENROUTER_API_KEY=\n"\n',
+    'r3-interp-other': f'X=${{{GEMINI}:-FAKER3M}}\n',
+    'r3-self-ref': f'{GEMINI}=${{{GEMINI}}}\n',
+    # a `#` line inside a quoted value: compose reads it as part of the value (or rejects the unclosed one), and
+    # neither local-up reader reads it
+    'r3-sq-multiline-hash': f"A='x\n# {GEMINI}=FAKER3N\n'\n",
+    'r3-dq-multiline-hash': f'A="x\n# {GEMINI}=FAKER3O\n"\n',
+    'r3-unclosed-then-hash': f'A="x\n# {GEMINI}=FAKER3P\n',
+    'r3-backtick-hash': f'A=`x\n# {GEMINI}=FAKER3Q\n`\n',
+}
+for _name in BOTH:
+    for _at, _letter in enumerate(_name):
+        if _letter == 'I':
+            ROUND_3[f'r3-dotted-{_name[14]}-{_at}'] = f'{_name[:_at]}{DOTTED}{_name[_at + 1 :]}=FAKEDOT\n'
+REVIEW_FIXTURES.update(ROUND_3)
+NOT_SET_FOR_ANY_READER = {'r3-sq-multiline-hash', 'r3-dq-multiline-hash', 'r3-unclosed-then-hash', 'r3-backtick-hash'}
 
 
 @pytest.mark.parametrize('fixture', sorted(REVIEW_FIXTURES))
@@ -264,31 +331,33 @@ def test_a_file_with_two_byte_order_marks_cannot_be_checked(tmp_path: Path) -> N
     assert refusal(environ) is None
 
 
-# -- the guard against compose itself ------------------------------------------------------------------------------
+# -- the guard against the readers themselves ----------------------------------------------------------------------
 
+SUPPORT = Path(__file__).resolve().parent / 'support'
 # The engine's deploy/compose.yaml hands the keys over the same way
 COMPOSE_FILE = (
     'services:\n  probe:\n    image: busybox\n    environment:\n'
     f'      G: ${{{GEMINI}:-}}\n      O: ${{{OPENROUTER}:-}}\n'
 )
-# What docker needs to find its compose plugin. No other variable of this process reaches compose, so a bare
-# `NAME` line cannot pick up a value from here.
-DOCKER_ENV = ('PATH', 'SYSTEMROOT', 'PROGRAMFILES', 'PROGRAMDATA', 'HOME', 'USERPROFILE', 'TEMP', 'TMP')
-Resolver = Callable[[int, str], set[str] | None]
+# What docker, pwsh and bash need to start. No other variable of this process reaches them, so a bare `NAME` line
+# cannot pick up a value from here.
+TOOL_ENV = ('PATH', 'SYSTEMROOT', 'PROGRAMFILES', 'PROGRAMDATA', 'HOME', 'USERPROFILE', 'TEMP', 'TMP', 'LANG', 'LC_ALL')
+# The paid names a reader sets to a non-empty value, per env file text; None where it rejects the file
+Reader = Callable[[dict[str, str]], dict[str, set[str] | None]]
 
 
-def docker_env() -> dict[str, str]:
-    return {name: value for name, value in os.environ.items() if name.upper() in DOCKER_ENV}
+def tool_env() -> dict[str, str]:
+    return {name: value for name, value in os.environ.items() if name.upper() in TOOL_ENV}
 
 
 @pytest.fixture(scope='module')
-def compose_resolves(tmp_path_factory: pytest.TempPathFactory) -> Resolver:
-    """The paid names `docker compose config` resolves to a non-empty value for an env file text, or None when compose
-    rejects the file. It only parses: nothing is pulled, built or started. Only names leave it, never a value."""
+def compose_reader(tmp_path_factory: pytest.TempPathFactory) -> Reader:
+    """`docker compose config`, which hands the engine its keys. It only parses: nothing is pulled, built or started.
+    Only names leave it, never a value."""
     if shutil.which('docker') is None:
         pytest.skip('docker is not on PATH')
     try:
-        version = subprocess.run(['docker', 'compose', 'version'], env=docker_env(), capture_output=True, timeout=60)
+        version = subprocess.run(['docker', 'compose', 'version'], env=tool_env(), capture_output=True, timeout=60)
     except (OSError, subprocess.TimeoutExpired):
         pytest.skip('docker compose did not answer')
     if version.returncode != 0:
@@ -296,46 +365,136 @@ def compose_resolves(tmp_path_factory: pytest.TempPathFactory) -> Resolver:
     folder = tmp_path_factory.mktemp('compose')
     (folder / 'compose.yaml').write_text(COMPOSE_FILE, encoding='utf-8')
 
-    def resolves(index: int, text: str) -> set[str] | None:
-        env_file = folder / f'{index}.env'
-        env_file.write_bytes(text.encode('utf-8'))
+    def resolves(item: tuple[int, str]) -> set[str] | None:
+        env_file = folder / f'{item[0]}.env'
+        env_file.write_bytes(item[1].encode('utf-8'))
         command = ['docker', 'compose', '-p', 'meridian-guard-probe', '--env-file', str(env_file)]
         command += ['-f', str(folder / 'compose.yaml'), 'config', '--format', 'json']
-        done = subprocess.run(command, env=docker_env(), cwd=folder, capture_output=True, timeout=120)
+        done = subprocess.run(command, env=tool_env(), cwd=folder, capture_output=True, timeout=120)
         if done.returncode != 0:
             return None  # compose refuses the file, so it would hand the engine nothing
         environment: dict[str, str | None] = json.loads(done.stdout)['services']['probe'].get('environment') or {}
         return {name for key, name in (('G', GEMINI), ('O', OPENROUTER)) if environment.get(key)}
 
-    return resolves
+    def read(texts: dict[str, str]) -> dict[str, set[str] | None]:
+        with ThreadPoolExecutor(8) as pool:
+            return dict(zip(texts, pool.map(resolves, enumerate(texts.values())), strict=True))
+
+    return read
 
 
-def compose_texts() -> dict[str, str]:
+def script_reader(command: list[str], folder: Path) -> Reader:
+    """A copied local-up reader, run over every text in eight parallel batches. Two flags per file come back."""
+
+    def read(texts: dict[str, str]) -> dict[str, set[str] | None]:
+        labels = list(texts)
+
+        def run(start: int) -> str:
+            batch = Path(tempfile.mkdtemp(dir=folder))
+            for index in range(start, len(labels), 8):
+                (batch / f'{index:06d}.env').write_bytes(texts[labels[index]].encode('utf-8'))
+            done = subprocess.run([*command, batch.as_posix()], env=tool_env(), capture_output=True, timeout=600)
+            assert done.returncode == 0, f'{Path(command[-1]).name} failed'  # not its output, which might hold a value
+            return done.stdout.decode('ascii')
+
+        found: dict[str, set[str] | None] = {}
+        with ThreadPoolExecutor(8) as pool:
+            for row in ''.join(pool.map(run, range(8))).splitlines():
+                stem, gemini, openrouter = row.split('\t')
+                flags = ((GEMINI, gemini), (OPENROUTER, openrouter))
+                found[labels[int(stem)]] = {name for name, flag in flags if flag == '1'}
+        return found
+
+    return read
+
+
+@pytest.fixture(scope='module')
+def pwsh_reader(tmp_path_factory: pytest.TempPathFactory) -> Reader:
+    """local-up.ps1's Get-EnvValue under pwsh, with its culture-sensitive StartsWith (ICU, the default culture)."""
+    pwsh = shutil.which('pwsh')
+    if pwsh is None:
+        pytest.skip('pwsh is not on PATH')
+    command = [pwsh, '-NoProfile', '-NonInteractive', '-File', str(SUPPORT / 'get_env_value.ps1')]
+    return script_reader(command, tmp_path_factory.mktemp('pwsh'))
+
+
+@pytest.fixture(scope='module')
+def bash_reader(tmp_path_factory: pytest.TempPathFactory) -> Reader:
+    """local-up.sh's env_value under bash."""
+    bash = shutil.which('bash')
+    if bash is None:
+        pytest.skip('bash is not on PATH')
+    if os.name == 'nt' and is_inside(os.environ.get('SYSTEMROOT', 'C:\\Windows'), bash):
+        pytest.skip('the bash on PATH is the WSL launcher, which cannot read these Windows paths')
+    return script_reader([bash, (SUPPORT / 'env_value.sh').as_posix()], tmp_path_factory.mktemp('bash'))
+
+
+@pytest.fixture(params=['compose', 'pwsh', 'bash'])
+def reader(request: pytest.FixtureRequest) -> tuple[str, Reader]:
+    name: str = request.param
+    return name, request.getfixturevalue(f'{name}_reader')
+
+
+def some_of_each_category() -> list[str]:
+    """About 24 code points from each category the ICU StartsWith skips most of: marks, format and control
+    characters."""
+    categories: dict[str, list[str]] = {}
+    for point in range(0x80, 0x110000):
+        category = unicodedata.category(chr(point))
+        if category in ('Mn', 'Mc', 'Me', 'Cf', 'Cc'):
+            categories.setdefault(category, []).append(chr(point))
+    return [char for chars in categories.values() for char in chars[:: -(-len(chars) // 24)]]
+
+
+@functools.cache
+def differential_texts() -> dict[str, str]:
+    """The reviewers' probes, the unit table, and suspicious characters around, inside and at the end of a name."""
     texts = {**REVIEW_FIXTURES, **{f'texts[{i}]': text for i, (text, _) in enumerate(TEXTS)}}
     for char in HIDING:
         texts[f'U+{ord(char):04X} after the name'] = f'{GEMINI}{char}=FAKE\n'
         texts[f'U+{ord(char):04X} before the name'] = f'{char}{OPENROUTER}=FAKE\n'
         texts[f'U+{ord(char):04X} as the value'] = f'{GEMINI}={char}\n'
+    for char in [chr(point) for point in range(0x80) if point != 0x0A] + HIDING:
+        texts[f'U+{ord(char):04X} inside the name'] = f'{GEMINI[:5]}{char}{GEMINI[5:]}=FAKE\n'
+        texts[f'U+{ord(char):04X} ends the name'] = f'{OPENROUTER}{char}=FAKE\n'
+    for char in some_of_each_category():
+        texts[f'U+{ord(char):04X} inside the name'] = f'{GEMINI[:5]}{char}{GEMINI[5:]}=FAKE\n'
     return texts
 
 
-def test_whenever_compose_resolves_a_paid_key_the_guard_refuses_it(compose_resolves: Resolver, tmp_path: Path) -> None:
-    texts = compose_texts()
-    with ThreadPoolExecutor(8) as pool:
-        resolved = dict(zip(texts, pool.map(compose_resolves, range(len(texts)), texts.values()), strict=True))
-    missed: list[str] = []
-    for index, (label, names) in enumerate(resolved.items()):
-        if names:
-            environ, folder = runtime_with(tmp_path / str(index))
-            (folder / 'meridian-engine.env').write_bytes(texts[label].encode('utf-8'))
-            message = refusal(environ) or ''
-            missed += [f'{label}: {name}' for name in sorted(names) if name not in message]
+@pytest.fixture(scope='module')
+def guard_allows(tmp_path_factory: pytest.TempPathFactory) -> set[str]:
+    """The texts the guard lets a contract run start with, as the runtime's env file."""
+    allowed: set[str] = set()
+    for index, (label, text) in enumerate(differential_texts().items()):
+        environ, folder = runtime_with(tmp_path_factory.mktemp(str(index)))
+        (folder / 'meridian-engine.env').write_bytes(text.encode('utf-8'))
+        if refusal(environ) is None:
+            allowed.add(label)
+    return allowed
+
+
+# What each reader must find, so one that reads nothing cannot pass. Compose takes '' as empty, matches a name without
+# case and keeps the last line; both local-up readers keep '', match case and take the first line; pwsh splits lines at
+# a lone CR, bash deletes it.
+ANCHORS: dict[str, dict[str, set[str]]] = {
+    'compose': {'r3-sq-G': set(), '20-lower': {GEMINI}, '08-after-multiline': {OPENROUTER}, '19-first-empty': {GEMINI}},
+    'pwsh': {'r3-sq-G': {GEMINI}, '20-lower': set(), '19-first-empty': set(), '01-cr-after-eq': set()},
+    'bash': {'r3-sq-G': {GEMINI}, '20-lower': set(), '19-first-empty': set(), '01-cr-after-eq': {GEMINI}},
+}
+
+
+def test_whenever_a_reader_sets_a_paid_key_the_guard_refuses(
+    reader: tuple[str, Reader], guard_allows: set[str]
+) -> None:
+    name, read = reader
+    texts = differential_texts()
+    found = read(texts)
+    assert found.keys() == texts.keys()
+    missed = [f'{label}: {key}' for label in sorted(guard_allows) for key in sorted(found[label] or ())]
     assert missed == []
-    # not vacuous: compose read these files, so a docker that resolves nothing cannot pass
-    assert resolved['20-lower'] == {GEMINI}
-    assert resolved['08-after-multiline'] == {OPENROUTER}
-    assert resolved['b03-dotless-i'] == set()
-    assert sum(names is not None for names in resolved.values()) > len(texts) // 2
+    assert {label: found[label] for label in ANCHORS[name]} == ANCHORS[name]
+    assert sum(names is not None for names in found.values()) > len(texts) // 2
 
 
 def test_a_value_never_comes_back() -> None:
@@ -762,6 +921,51 @@ def test_a_registry_proxy_is_refused_whatever_the_process_environment_says(
     assert message is not None
     assert scheme in message
     assert SECRET not in message
+    assert 'reg.example' not in message
+
+
+@pytest.mark.parametrize(
+    'registry',
+    [{'socks': 'socks://reg.example:1080'}, {'ftp': 'http://reg.example:21'}, {'gopher': 'reg.example:70'}],
+    ids=['socks', 'ftp', 'other'],
+)
+def test_any_registry_proxy_entry_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, registry: dict[str, str]
+) -> None:
+    environ, _ = runtime_with(tmp_path)
+    monkeypatch.setattr(urllib.request, 'getproxies_registry', lambda: registry, raising=False)
+    message = refusal(environ)
+    assert message is not None
+    assert 'registry' in message
+    assert 'reg.example' not in message
+    monkeypatch.setattr(urllib.request, 'getproxies_registry', lambda: {'socks': ''}, raising=False)
+    assert refusal(environ) is None
+
+
+@pytest.mark.parametrize('server', ['socks=reg.example:1080', 'ftp=reg.example:21', 'reg.example:3128'])
+def test_a_proxy_server_entry_the_standard_library_reads_from_the_registry_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, server: str
+) -> None:
+    if sys.platform != 'win32':
+        pytest.skip('the Windows registry')
+    import winreg
+
+    class Key:
+        def Close(self) -> None:
+            pass
+
+    def open_key(*_: object) -> Key:
+        return Key()
+
+    def query(_: object, name: str) -> tuple[object, int]:
+        return {'ProxyEnable': (1, winreg.REG_DWORD), 'ProxyServer': (server, winreg.REG_SZ)}[name]
+
+    environ, _ = runtime_with(tmp_path)
+    monkeypatch.setattr(winreg, 'OpenKey', open_key)  # nothing of this machine's registry is read
+    monkeypatch.setattr(winreg, 'QueryValueEx', query)
+    monkeypatch.setattr(urllib.request, 'getproxies_registry', REAL_REGISTRY)
+    message = refusal(environ)
+    assert message is not None
     assert 'reg.example' not in message
 
 

@@ -336,17 +336,20 @@ variables only, never values) unless all of these hold:
 
 - no paid provider key (`GAUSSMERIDIAN_GEMINI_API_KEY`, `GAUSSMERIDIAN_OPENROUTER_API_KEY`) is set in the process
   environment or in any engine env file: the canonical `meridian-engine.env`, the one in `MERIDIAN_RUNTIME_DIR`, and
-  the `GAUSSMERIDIAN_ENV_FILE` target are all read. The files are not parsed: any line that names a paid key sets it
-  unless the line is exactly an empty assignment (`NAME=`, `NAME=""`, `NAME=''`, optionally after `export ` or
-  `set `), so a whitespace-only value counts as set. A file with a character some reader hides (a non-ASCII space or
-  format character, a default-ignorable code point, a control character, a lone CR) cannot be checked and is refused.
-  When Docker is available, a test compares this with what `docker compose config` itself resolves;
+  the `GAUSSMERIDIAN_ENV_FILE` target are all read. Any character outside printable ASCII and tab anywhere in the
+  file (after one leading byte order mark), a lone CR included, is refused: the file cannot be checked. The files
+  are not parsed: any line that names a paid key, in any letter case, sets it unless the line is exactly an empty
+  assignment (`NAME=` or `NAME=""`, optionally after `export ` or `set `), so a whitespace-only value counts as set
+  and so does `NAME=''` (both local-up readers keep the two quotes, which turns simulator mode off). A test compares
+  this with the three readers that matter, each when its tool is installed: `docker compose config`, a copy of
+  local-up.ps1's `Get-EnvValue` under `pwsh` and a copy of local-up.sh's `env_value` under `bash`;
 - every path it reads stays inside the local runtime folder;
 - every engine URL is loopback. `localhost` is accepted, but it is resolved by the system resolver (hosts file, DNS),
   which the guard does not control; prefer `http://127.0.0.1:8180` or `http://[::1]:8180`;
 - no `http`, `https` or `all` proxy is set in the environment (`HTTP_PROXY`, `HTTPS_PROXY`, `ALL_PROXY`, any letter
-  case) or, on Windows, in the registry (read even when `NO_PROXY` or another proxy variable is set). A PAC file,
-  WPAD and the WinHTTP proxy are not detected; the suite runs with `NO_PROXY=*` so its own traffic ignores them.
+  case) and, on Windows, no proxy server entry of any kind (SOCKS and FTP included) is in the registry (read even
+  when `NO_PROXY` or another proxy variable is set). A PAC file, WPAD and the WinHTTP proxy are not detected; the
+  suite runs with `NO_PROXY=*` so its own traffic ignores them.
 
 The suite runs as `uv run --frozen --offline --no-env-file pytest -m "not fake_only"`: nothing is resolved or
 downloaded and no `.env` file adds variables.
@@ -357,6 +360,12 @@ process that runs `docker compose` (a bare `NAME` line inherits from it), a runt
 `GAUSSMERIDIAN_USAGE_RECEIVER_URL`) are outside the two-key rule. Whether a contract run must require simulator mode
 or inspect the running engine container's environment (by name only) is an open owner decision; it is settled before
 any contract run.
+
+Engine-side carry (not changed here): `Get-EnvValue` in the engine's `scripts/local-common.ps1` uses a
+culture-sensitive `StartsWith`, which skips control characters, marks and some letters inside a name; it should use
+`StartsWith("$Name=", [StringComparison]::Ordinal)`. Both local-up readers (`Get-EnvValue` and `env_value` in
+`scripts/local-common.sh`) strip double quotes only, so `NAME=''` turns simulator mode off; both should strip single
+quotes too. Until then the guard refuses what those readers would read differently.
 
 `pytest --noconftest` drops the suite's conftest and with it the `engine` fixture, so no test can reach an engine at
 all (the engine tests error with `fixture 'engine' not found`).
