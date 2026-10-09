@@ -37,6 +37,26 @@ async def test_create_returns_the_completion_and_three_token_counts(mode: str, e
 
 
 @pytest.mark.fake_only
+@pytest.mark.parametrize('usage', ['x', 1.5, [1], True, 0, [], ''], ids=repr)
+async def test_a_usage_that_is_no_object_gives_no_counts_and_never_raises(mode: str, engine: Any, usage: Any) -> None:
+    engine.next(Scripted(json={**completion('hello'), 'usage': usage}))
+    result = await resolve(make_client(mode, engine).chat.create({'messages': MSG}))
+    assert result.error is None
+    assert result.data['usage'] == {}
+    assert result.data['choices'][0]['message']['content'] == 'hello'
+
+
+@pytest.mark.fake_only
+@pytest.mark.parametrize('constant', ['NaN', 'Infinity', '-Infinity'])
+async def test_a_reply_holding_a_non_standard_number_is_a_network_error(mode: str, engine: Any, constant: str) -> None:
+    # Go and JavaScript refuse these constants; the SDK reads JSON strictly everywhere
+    engine.next(Scripted(text='{"id": "c", "choices": [], "x": ' + constant + '}'))
+    result = await resolve(make_client(mode, engine).chat.create({'messages': MSG}))
+    assert result.data is None
+    assert result.error.code == 'network_error'
+
+
+@pytest.mark.fake_only
 async def test_create_sends_bearer_key_no_model_and_stream_false(mode: str, engine: Any) -> None:
     params: Any = {'messages': MSG, 'stream': True}
     await resolve(make_client(mode, engine).chat.create(params))

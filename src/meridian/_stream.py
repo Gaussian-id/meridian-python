@@ -26,11 +26,12 @@ USAGE_KEYS = ('prompt_tokens', 'completion_tokens', 'total_tokens')
 _STREAM_FAILURES = (httpx.HTTPError, httpx.StreamError)
 
 
-def token_counts(usage: Mapping[str, Any] | None) -> dict[str, int]:
-    """Only the three token counts leave the SDK, and only those present as ints."""
+def token_counts(usage: object) -> dict[str, int]:
+    """Only the three token counts leave the SDK, and only those present as ints. Anything but an object has none."""
+    fields: Mapping[str, Any] = cast('Mapping[str, Any]', usage) if isinstance(usage, Mapping) else {}
     counts: dict[str, int] = {}
     for key in USAGE_KEYS:
-        value = (usage or {}).get(key)
+        value = fields.get(key)
         if isinstance(value, int) and not isinstance(value, bool):
             counts[key] = value
     return counts

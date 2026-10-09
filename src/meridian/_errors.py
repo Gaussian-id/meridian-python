@@ -140,11 +140,16 @@ NOT_JSON: Final = object()  # what load_json gives for text that is not JSON
 MALFORMED: Final = object()  # what error_member gives for an error member it cannot read
 
 
+def _no_constant(name: str) -> Any:
+    raise ValueError(f'{name} is not JSON')
+
+
 def load_json(text: str, **hooks: Any) -> Any:
     """The decoded JSON, or NOT_JSON when the text is not JSON or nests deeper than the parser allows
-    (RecursionError). `hooks` go to `json.loads` (parse_int, parse_float, parse_constant)."""
+    (RecursionError). Strict, as Go and JavaScript are: `NaN`, `Infinity` and `-Infinity` are not JSON. `hooks` go to
+    `json.loads` (parse_int, parse_float)."""
     try:
-        return json.loads(text, **hooks)
+        return json.loads(text, parse_constant=_no_constant, **hooks)
     except (ValueError, RecursionError):
         return NOT_JSON
 
@@ -158,7 +163,8 @@ _INSIDE_ERROR = ('message', 'type', 'code', 'request_id')
 
 def _has_case_variant(fields: Mapping[Any, Any], names: tuple[str, ...]) -> bool:
     # casefold, not lower: Go's strings.EqualFold also folds the long s (U+017F) to s, so `choice` + long s is `choices`
-    # to it
+    # to it. casefold is a superset of EqualFold (it also folds `ß`, ligatures and more), so it can only read a key as
+    # a variant that Go would not: that fails closed
     return any(isinstance(key, str) and key not in names and key.casefold() in names for key in fields)
 
 

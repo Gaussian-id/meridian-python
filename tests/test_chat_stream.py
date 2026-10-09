@@ -222,6 +222,15 @@ async def test_a_chunk_whose_delta_holds_a_key_named_error_is_ordinary_content(m
     assert await collect(s) == ['a', 'b'] and s.error is None
 
 
+@pytest.mark.parametrize('constant', ['NaN', 'Infinity', '-Infinity'])
+async def test_a_frame_holding_a_non_standard_number_is_a_network_error(mode: str, engine: Any, constant: str) -> None:
+    bad = '{"choices": [{"delta": {"content": "late"}}], "x": ' + constant + '}'
+    s = await open_stream(mode, engine, frame(chunk('a')), frame(bad), frame('[DONE]'))
+    assert await collect(s) == ['a']
+    assert s.error.code == 'network_error' and 'valid JSON' in s.error.message
+    assert engine.upstream_closed()
+
+
 async def test_a_frame_nested_too_deep_to_parse_is_a_network_error(mode: str, engine: Any) -> None:
     s = await open_stream(mode, engine, frame('[' * 100_000), frame('[DONE]'))
     assert await collect(s) == []

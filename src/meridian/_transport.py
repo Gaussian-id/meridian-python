@@ -260,7 +260,9 @@ class _Shared:
             return _Shared.too_large(response)
         data: Any = load_json(raw.decode('utf-8', 'replace'))
         if data is NOT_JSON:
-            return Err(client_error('network_error', 'The response could not be decoded.', status))
+            return Err(
+                client_error('network_error', 'The response could not be decoded.', status, valid_request_id(header_id))
+            )
         if data is None:  # a literal null is nothing: no call takes it for a result
             return Err(client_error('network_error', 'The response was empty (JSON null).', status))
 

@@ -29,6 +29,7 @@ from typing import TYPE_CHECKING, Any, Generic, Literal, Protocol, TypeVar, cast
 
 from ._client import AsyncMeridian, Meridian, async_shared_client, shared_client
 from ._errors import (
+    NOT_JSON,
     STATUS_BY_CODE,
     MeridianError,
     Result,
@@ -298,22 +299,24 @@ def _close_quietly(*things: object) -> None:
     """Close each of these that has a `close()`, once each: best-effort, a close that raises changes nothing."""
     seen: list[object] = []
     for thing in things:
-        close = getattr(thing, 'close', None)
-        if callable(close) and not any(thing is done for done in seen):
+        if not any(thing is done for done in seen):
             seen.append(thing)
-            with contextlib.suppress(Exception):
-                close()
+            with contextlib.suppress(Exception):  # a `close` that cannot even be looked up changes nothing either
+                close = getattr(thing, 'close', None)
+                if callable(close):
+                    close()
 
 
 async def _aclose_quietly(*things: object) -> None:
     """`_close_quietly` for async sources: each one's `aclose()`."""
     seen: list[object] = []
     for thing in things:
-        aclose = getattr(thing, 'aclose', None)
-        if callable(aclose) and not any(thing is done for done in seen):
+        if not any(thing is done for done in seen):
             seen.append(thing)
             with contextlib.suppress(Exception):
-                await cast('Callable[[], Awaitable[object]]', aclose)()
+                aclose = getattr(thing, 'aclose', None)
+                if callable(aclose):
+                    await cast('Callable[[], Awaitable[object]]', aclose)()
 
 
 def _read(read_body: Callable[[], object]) -> bytes | Reply[Any]:
@@ -364,10 +367,6 @@ async def _aread(read_body: Callable[[], object]) -> bytes | Reply[Any]:
         return bytes(gathered)
     except Exception:
         return _unreadable()
-
-
-def _not_json(_: str) -> float:
-    raise ValueError('not JSON')
 
 
 def _finite(text: str) -> float:
@@ -437,8 +436,10 @@ def _parse(raw: bytes) -> dict[str, Any] | Reply[Any]:
     # [1] Strict UTF-8 JSON (no UTF-16 or UTF-32, no BOM; no NaN or Infinity, which would not re-encode as JSON). The
     # bytes are already within MAX_BODY_BYTES (_read)
     try:
-        body: Any = json.loads(raw.decode('utf-8'), parse_constant=_not_json, parse_float=_finite)
-    except (ValueError, RecursionError):
+        body: Any = load_json(raw.decode('utf-8'), parse_float=_finite)
+    except UnicodeDecodeError:
+        body = NOT_JSON
+    if body is NOT_JSON:
         return _refuse(400, 'invalid_request', 'The body must be JSON.')
 
     # [2] An object with a non-empty message list, nested no deeper than a chat body ever is
@@ -553,9 +554,9 @@ def _judge(event: bytes, first: bool) -> tuple[_Judgement, str | None]:
     if data == ['[DONE]']:
         return 'pass', None
 
-    # [3] The data must be a JSON object (not JSON, or too deep to parse, is terminal). Numbers are never converted, so
-    # no number can make a frame unreadable here yet readable in a browser
-    parsed: Any = load_json('\n'.join(data), parse_int=_skip, parse_float=_skip, parse_constant=_skip)
+    # [3] The data must be a JSON object (not JSON, NaN or Infinity, or too deep to parse, is terminal). Numbers are
+    # never converted, so no number can make a frame unreadable here yet readable in a browser
+    parsed: Any = load_json('\n'.join(data), parse_int=_skip, parse_float=_skip)
     if not isinstance(parsed, dict):
         return 'terminal', None
 

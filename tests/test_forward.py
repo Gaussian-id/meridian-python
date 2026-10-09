@@ -392,6 +392,44 @@ class Source:
         return read
 
 
+class UnlookableClose:
+    """A chunk source (sync and async) whose `close` and `aclose` cannot even be looked up."""
+
+    def __init__(self, raw: bytes) -> None:
+        self.raw = raw
+
+    def __iter__(self) -> Iterator[bytes]:
+        return iter([self.raw])
+
+    def __aiter__(self) -> AsyncIterator[bytes]:
+        async def pieces() -> AsyncIterator[bytes]:
+            yield self.raw
+
+        return pieces()
+
+    @property
+    def close(self) -> object:
+        raise RuntimeError('no close here')
+
+    @property
+    def aclose(self) -> object:
+        raise RuntimeError('no aclose here')
+
+
+async def test_a_close_that_cannot_be_looked_up_does_not_turn_a_good_body_into_a_400(mode: str, engine: Any) -> None:
+    raw = json.dumps({'messages': MSG}).encode()
+    reply = await send(build(mode, engine), raw, read=lambda: UnlookableClose(raw))
+    assert reply.status == 200 and engine.bodies()[0]['messages'] == MSG
+
+
+@pytest.mark.parametrize('usage', ['x', 1.5, [1], True], ids=repr)
+async def test_a_reply_whose_usage_is_no_object_is_forwarded_without_counts(mode: str, engine: Any, usage: Any) -> None:
+    engine.next(Scripted(json={**completion('hello'), 'usage': usage}))
+    reply = await send(build(mode, engine), {'messages': MSG})
+    assert reply.status == 200
+    assert payload(reply)['usage'] == {} and payload(reply)['choices'][0]['message']['content'] == 'hello'
+
+
 def endless() -> Iterator[bytes]:
     while True:
         yield b'x' * 65536
@@ -695,12 +733,13 @@ async def test_a_passed_through_rate_limit_relays_a_valid_retry_after(
 @pytest.mark.parametrize(
     'value',
     [
-        'Mon, 01 Jan 99999999999999999999 00:00:00 GMT',
-        'Mon, 01 Jan 0000 00:00:00 GMT',
-        'Mon, 01 Jan 0001 00:00:00 +1400',
+        'Mon, 01 Jan 99999999999999999999 00:00:00 GMT',  # a year no datetime holds
+        'Thu, 01 Jan 0100 00:00:00 +1400',  # year 100 as written: far before the epoch
+        'Mon, 01 Jan 0000 00:00:00 GMT',  # a year below 100 is read as 19xx or 20xx: here 2000, an ordinary past date
+        'Mon, 01 Jan 0001 00:00:00 +1400',  # likewise 2001
     ],
 )
-async def test_an_absurd_retry_after_date_never_makes_the_forwarder_raise(
+async def test_an_odd_retry_after_date_never_makes_the_forwarder_raise(
     mode: str, engine: Any, value: str, status: int
 ) -> None:
     code = 'invalid_request' if status == 400 else 'rate_limited'
@@ -919,8 +958,9 @@ async def test_a_200_reply_with_a_null_error_key_is_an_ordinary_reply(mode: str,
     assert reply.status == 200 and payload(reply)['choices'][0]['message']['content'] == 'hey'
 
 
-# A reply the client decoded may still not encode for the browser: nested past the encoder's depth (on a Python whose
-# decoder allows more), or holding a NaN (valid to decode, no JSON to send). Either is the generic 503, never a raise
+# A reply holding a NaN or Infinity is not JSON (the client reads it strictly, as Go and JavaScript do) and is a
+# network error with the response's request id: the generic 503, never a raise. A reply the client decoded may also
+# not encode for the browser: nested past the encoder's depth on a Python whose decoder allows more (next test)
 @pytest.mark.parametrize('extra', [pytest.param('NaN', id='nan'), pytest.param('[Infinity]', id='infinity')])
 async def test_a_buffered_reply_holding_a_nan_is_a_generic_503_with_the_replys_id(
     mode: str, engine: Any, extra: str
@@ -1161,6 +1201,17 @@ async def test_a_cut_off_last_event_fails_closed(mode: str, engine: Any) -> None
     )
     assert out.startswith(frame(chunk('a')).encode()) and b'key_expired' not in out
     assert last_event(out) == generic('r')
+
+
+@pytest.mark.parametrize('constant', [b'NaN', b'Infinity', b'-Infinity'])
+async def test_an_event_holding_a_non_standard_number_fails_closed(mode: str, engine: Any, constant: bytes) -> None:
+    # Not JSON for Go or a browser's JSON.parse: it cannot be judged, so nothing after it is read or sent
+    bad = b'data: {"choices": [{"delta": {"content": "late"}}], "x": ' + constant + b'}\n\n'
+    parts = [frame(chunk('a')).encode(), bad, frame(chunk('b')).encode(), frame('[DONE]').encode()]
+    out = await drain(await stream_reply(mode, engine, parts, headers={'x-request-id': 'r'}))
+    assert out.startswith(frame(chunk('a')).encode()) and b'late' not in out and b'[DONE]' not in out
+    assert last_event(out) == generic('r')
+    assert engine.upstream_closed() and engine.parts_read() == 2
 
 
 async def test_an_event_too_deep_to_judge_fails_closed(mode: str, engine: Any) -> None:

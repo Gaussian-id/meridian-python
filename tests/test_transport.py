@@ -50,14 +50,17 @@ async def test_a_wait_longer_than_30_s_returns_the_error_at_once(
     assert result.error.code == 'rate_limited' and result.error.request_id and clock == []
 
 
-ABSURD_DATES = [
+# The parser reads a year below 100 as 19xx or 20xx, so the 0000 and 0001 dates are ordinary dates in the past; only the
+# first and the 0100 one (kept as written) are extreme. None of them may raise.
+ODD_HTTP_DATES = [
     'Mon, 01 Jan 99999999999999999999 00:00:00 GMT',  # a year no datetime holds: used to raise OverflowError
-    'Mon, 01 Jan 0000 00:00:00 GMT',  # year 0
-    'Mon, 01 Jan 0001 00:00:00 +1400',  # before the epoch, near the smallest date
+    'Thu, 01 Jan 0100 00:00:00 +1400',  # year 100 as written: far before the epoch, near the smallest date
+    'Mon, 01 Jan 0000 00:00:00 GMT',  # read as the year 2000: a past date
+    'Mon, 01 Jan 0001 00:00:00 +1400',  # read as the year 2001: a past date
 ]
 
 
-@pytest.mark.parametrize('value', ['0', ' ', '1e3', '0x10', 'Wed, 21 Oct 2015 07:28:00 GMT', '-5', *ABSURD_DATES])
+@pytest.mark.parametrize('value', ['0', ' ', '1e3', '0x10', 'Wed, 21 Oct 2015 07:28:00 GMT', '-5', *ODD_HTTP_DATES])
 async def test_odd_retry_after_values_fall_back_to_backoff_with_jitter(
     mode: str, engine: Any, clock: list[float], value: str
 ) -> None:
@@ -109,17 +112,17 @@ def test_a_future_http_date_is_a_wait() -> None:
     assert retry_after_seconds(None) is None
 
 
-@pytest.mark.parametrize('value', ABSURD_DATES)
-def test_an_absurd_http_date_is_no_wait_and_never_raises(value: str) -> None:
+@pytest.mark.parametrize('value', ODD_HTTP_DATES)
+def test_an_odd_http_date_is_no_wait_and_never_raises(value: str) -> None:
     from meridian._transport import retry_after_seconds, valid_retry_after
 
     assert retry_after_seconds(value) is None
     assert valid_retry_after(value) in (None, value)  # a date the engine could send or not: only a raise is wrong
 
 
-@pytest.mark.parametrize('value', ABSURD_DATES)
+@pytest.mark.parametrize('value', ODD_HTTP_DATES)
 @pytest.mark.parametrize('status', [400, 429])
-async def test_an_absurd_retry_after_is_an_error_value_from_every_client(
+async def test_an_odd_retry_after_date_is_an_error_value_from_every_client(
     mode: str, engine: Any, clock: list[float], value: str, status: int
 ) -> None:
     from meridian.admin import AsyncMeridianAdmin, MeridianAdmin
