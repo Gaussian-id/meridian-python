@@ -256,12 +256,6 @@ class SupplierLimits(TypedDict):
     max_output_tokens: int
 
 
-class SupplierPriceResponse(TypedDict):
-    cached_input_per_million: NotRequired[int | None]
-    input_per_million: int
-    output_per_million: int
-
-
 SupplierRoutingClass: TypeAlias = Literal['light', 'standard', 'advanced']
 
 
