@@ -11,13 +11,13 @@ import inspect
 import json
 import math
 import re
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Generator, Iterable, Iterator, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar, cast
 
 from ._client import AsyncMeridian, Meridian
-from ._errors import MeridianError, Result, config_error
+from ._errors import STATUS_BY_CODE, MeridianError, Result, config_error
 from ._stream import AsyncChatStream, ChatStream
 
 if TYPE_CHECKING:
@@ -28,6 +28,12 @@ C = TypeVar('C')
 
 DEFAULT_MAX_TOKENS_CAP = 4096
 GENERIC_MESSAGE = 'The service is temporarily unavailable.'
+
+# A browser's request body may be this many bytes (the engine's own request limit, and meridian-go's)
+MAX_BODY_BYTES = 8 << 20
+
+# A browser's JSON may nest containers this deep (a chat body is shallow)
+MAX_BODY_DEPTH = 64
 
 # One streamed event may be this many bytes before the stream is failed closed (the parser's own cap, in bytes)
 MAX_EVENT_BYTES = 16 * 1024 * 1024
@@ -69,7 +75,12 @@ class AllowRule:
 @dataclass(frozen=True)
 class Reply:
     """What a framework adapter sends back. `passthrough` is set (and nothing else) when `authorize` answered with
-    the app's own response."""
+    the app's own response.
+
+    A streaming `body` holds the engine's response open from the moment the Reply exists, so the caller must close
+    it on every exit path: `close()` (sync) or `await aclose()` (async), even when it never started iterating
+    (the browser left before the first read). Closing is idempotent; a finished body needs no closing but allows it.
+    """
 
     status: int
     headers: dict[str, str] = field(default_factory=lambda: {})
@@ -108,8 +119,9 @@ def _generic_frame(request_id: str | None) -> bytes:
 
 
 def _browser_error(error: MeridianError) -> Reply:
-    # [1] The app's own key, account or credit, and any failure on the SDK's side: the generic 503, request id kept
-    if error.code in APP_CREDENTIAL_CODES or error.type == 'client_error':
+    # [1] The app's own key, account or credit, any failure on the SDK's side, and any engine code this SDK does not
+    # recognise (a newer engine's code could be about the app's account): the generic 503, request id kept
+    if error.code in APP_CREDENTIAL_CODES or error.type == 'client_error' or error.engine_code is not None:
         return _json_reply(503, _generic(error.request_id), error.request_id)
 
     # [2] Anything about the end user's own request keeps its real status and code
@@ -148,13 +160,14 @@ def _precheck(method: str, content_type: str | None) -> Reply | None:
     return None
 
 
-def _verdict(value: object) -> Reply | None:
-    """True proceeds; False or None is a 403; any other value is the app's own response, returned untouched."""
+def _verdict(value: object, response_type: type | tuple[type, ...]) -> Reply | None:
+    """Only the literal True proceeds. An instance of `response_type` is the app's own response, returned untouched.
+    Anything else (a truthy user object, 0, '', a coroutine, ...) is a 403: it must never be taken for a yes."""
     if value is True:
         return None
-    if value is False or value is None:
-        return _denied()
-    return Reply(0, passthrough=value)
+    if isinstance(value, response_type):
+        return Reply(0, passthrough=value)
+    return _denied()
 
 
 def _browser_key(value: str | None) -> str | None:
@@ -229,19 +242,39 @@ class _Ask:
     idempotency_key: str | None
 
 
+def _too_deep(body: dict[str, Any]) -> bool:
+    """True when containers nest deeper than MAX_BODY_DEPTH (the body itself is level 1), counted without recursion."""
+    pending: list[tuple[Any, int]] = [(body, 1)]
+    while pending:
+        container, level = pending.pop()
+        if level > MAX_BODY_DEPTH:
+            return True
+        children = cast('Iterable[Any]', container.values() if isinstance(container, dict) else container)
+        for child in children:
+            if isinstance(child, (dict, list)):
+                pending.append((cast('Any', child), level + 1))
+    return False
+
+
 def _parse(raw: bytes) -> dict[str, Any] | Reply:
-    # [1] Strict JSON (no NaN or Infinity, which would not re-encode as JSON), never deeper than the parser allows
+    # [1] Over the engine's own limit: refused before anything is decoded
+    if len(raw) > MAX_BODY_BYTES:
+        return _refuse(413, 'body_too_large', 'The request body is too large.')
+
+    # [2] Strict UTF-8 JSON (no UTF-16 or UTF-32, no BOM; no NaN or Infinity, which would not re-encode as JSON)
     try:
-        body: Any = json.loads(raw, parse_constant=_not_json, parse_float=_finite)
+        body: Any = json.loads(raw.decode('utf-8'), parse_constant=_not_json, parse_float=_finite)
     except (ValueError, RecursionError):
         return _refuse(400, 'invalid_request', 'The body must be JSON.')
 
-    # [2] An object with a non-empty message list
+    # [3] An object with a non-empty message list, nested no deeper than a chat body ever is
     if not isinstance(body, dict):
         return _refuse(400, 'invalid_request', 'messages must be a non-empty list.')
     fields = cast('dict[str, Any]', body)
     if not isinstance(fields.get('messages'), list) or not fields['messages']:
         return _refuse(400, 'invalid_request', 'messages must be a non-empty list.')
+    if _too_deep(fields):
+        return _refuse(400, 'invalid_request', 'The body is nested too deeply.')
     return fields
 
 
@@ -308,13 +341,13 @@ def _judge(event: bytes, first: bool) -> tuple[_Judgement, str | None]:
     except ValueError:
         return 'not_json', None
 
-    # [3] Hidden only when it is an error whose code is about the app's own key, account or credit
+    # [3] Hidden when it is an error about the app's own key, account or credit, or whose code this SDK does not know
     error: Any = cast('dict[str, Any]', value).get('error') if isinstance(value, dict) else None
     if not isinstance(error, dict):
         return 'pass', None
     fields = cast('dict[str, Any]', error)
     code, request_id = fields.get('code'), fields.get('request_id')
-    if not (isinstance(code, str) and code in APP_CREDENTIAL_CODES):
+    if not isinstance(code, str) or (code in STATUS_BY_CODE and code not in APP_CREDENTIAL_CODES):
         return 'pass', None
     return 'hide', request_id if isinstance(request_id, str) else None
 
@@ -377,7 +410,7 @@ class _Guard:
         return b'\n\n' + _generic_frame(self._request_id)
 
 
-def _relay(stream: ChatStream) -> Iterator[bytes]:
+def _relay(stream: ChatStream) -> Generator[bytes, None, None]:
     guard = _Guard(stream.request_id)
     upstream = stream.iter_bytes()
     try:
@@ -400,7 +433,7 @@ def _relay(stream: ChatStream) -> Iterator[bytes]:
         upstream.close()
 
 
-async def _arelay(stream: AsyncChatStream) -> AsyncIterator[bytes]:
+async def _arelay(stream: AsyncChatStream) -> AsyncGenerator[bytes, None]:
     guard = _Guard(stream.request_id)
     upstream = stream.aiter_bytes()
     try:
@@ -421,6 +454,63 @@ async def _arelay(stream: AsyncChatStream) -> AsyncIterator[bytes]:
     finally:
         # [3] Finished, failed, cancelled, or abandoned by the browser: upstream is closed
         await upstream.aclose()
+
+
+class _Body:
+    """The relay as a body the caller can always close. The engine's response is open before the first read, and a
+    generator closed before it started never runs its `finally`, so the unstarted case is closed here instead."""
+
+    def __init__(self, stream: ChatStream) -> None:
+        self._stream = stream
+        self._relay: Generator[bytes, None, None] | None = None
+        self._closed = False
+
+    def __iter__(self) -> Iterator[bytes]:
+        return self
+
+    def __next__(self) -> bytes:
+        if self._closed:
+            raise StopIteration
+        if self._relay is None:
+            self._relay = _relay(self._stream)
+        return next(self._relay)
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        if self._relay is None:
+            self._stream.cancel()  # never started: close upstream directly
+        else:
+            self._relay.close()  # its `finally` closes upstream
+
+
+class _AsyncBody:
+    """`_Body` for async: `aclose()` is safe at any point and any number of times."""
+
+    def __init__(self, stream: AsyncChatStream) -> None:
+        self._stream = stream
+        self._relay: AsyncGenerator[bytes, None] | None = None
+        self._closed = False
+
+    def __aiter__(self) -> AsyncIterator[bytes]:
+        return self
+
+    async def __anext__(self) -> bytes:
+        if self._closed:
+            raise StopAsyncIteration
+        if self._relay is None:
+            self._relay = _arelay(self._stream)
+        return await anext(self._relay)
+
+    async def aclose(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        if self._relay is None:
+            await self._stream.cancel()  # never started: close upstream directly
+        else:
+            await self._relay.aclose()  # its `finally` closes upstream
 
 
 def _streaming(request_id: str | None, body: Iterator[bytes] | AsyncIterator[bytes]) -> Reply:
@@ -446,9 +536,18 @@ def _require(authorize: object) -> None:
 
 
 class Forwarder(Generic[R]):
-    """The forwarding route for a sync framework. `client` is a Meridian, or a function returning one (called per
-    request, never at creation). `authorize(request)` returns True to proceed, False or None to refuse (403), or the
-    app's own response, which is returned untouched as `Reply.passthrough`."""
+    """The forwarding route for a sync framework.
+
+    `client` is a Meridian, or a function returning one. The function is called for every request, never at creation,
+    and the forwarder never closes a client, given or returned: the function should return one long-lived shared
+    client, built once and closed by the app at shutdown, never a new client per request (each one would hold its own
+    connections open).
+
+    `authorize(request)` decides who may spend the app's credit: only the literal `True` proceeds. An instance of
+    `response_type` (a `Reply` by default; an adapter passes its framework's response class) is the app's own
+    response, returned untouched as `Reply.passthrough`. Anything else, or a raise, is a 403 and the engine is
+    never called.
+    """
 
     def __init__(
         self,
@@ -456,21 +555,23 @@ class Forwarder(Generic[R]):
         client: Meridian | Callable[[], Meridian],
         authorize: Callable[[R], object],
         allow: AllowRule | None = None,
+        response_type: type | tuple[type, ...] = Reply,
     ) -> None:
         _require(authorize)
         self._client, self._authorize, self._allowed = client, authorize, _Allowed.of(allow or AllowRule())
+        self._response_type = response_type
 
     def _decide(self, request: R) -> Reply | None:
         # A raising authorize is a refusal, never a crash and never a way through
         try:
             outcome = self._authorize(request)
+
+            # An async authorize given to the sync helper is never awaited here, so it is never a yes
+            if inspect.iscoroutine(outcome):
+                outcome.close()
+            return _verdict(outcome, self._response_type)
         except Exception:
             return _denied()
-
-        # An async authorize given to the sync helper is never awaited here, so it is never a yes
-        if inspect.iscoroutine(outcome):
-            outcome.close()
-        return _denied() if inspect.isawaitable(outcome) else _verdict(outcome)
 
     def handle(
         self,
@@ -481,6 +582,9 @@ class Forwarder(Generic[R]):
         idempotency_key: str | None,
         read_body: Callable[[], bytes],
     ) -> Reply:
+        """Answer one browser request. `read_body` is called only after `authorize` said yes, and the bytes it
+        returns are capped at MAX_BODY_BYTES (413): the adapter should bound its own read too, so a huge body is
+        never held in memory before this check. A streaming `Reply.body` must be closed by the caller (see Reply)."""
         # [1] POST and JSON only, then the app's own decision
         refused = _precheck(method, content_type) or self._decide(request)
         if refused is not None:
@@ -506,13 +610,14 @@ class Forwarder(Generic[R]):
             opened = client.chat.stream(params, idempotency_key=ask.idempotency_key)
             if opened.error is not None:
                 return _browser_error(opened.error)
-            return _streaming(opened.data.request_id, _relay(opened.data))
+            return _streaming(opened.data.request_id, _Body(opened.data))
         return _buffered(client.chat.create(params, idempotency_key=ask.idempotency_key))
 
 
 class AsyncForwarder(Generic[R]):
-    """Forwarder for an async framework: `client` is an AsyncMeridian or a function returning one, and `authorize`
-    may be async."""
+    """Forwarder for an async framework; see `Forwarder`. `client` is an AsyncMeridian or a function returning one
+    (the function should return one long-lived shared client, closed by the app at shutdown; the forwarder never closes
+    it), and `authorize` may be async: it is awaited once, and an awaitable it returns is a 403, not a yes."""
 
     def __init__(
         self,
@@ -520,9 +625,11 @@ class AsyncForwarder(Generic[R]):
         client: AsyncMeridian | Callable[[], AsyncMeridian],
         authorize: Callable[[R], object],
         allow: AllowRule | None = None,
+        response_type: type | tuple[type, ...] = Reply,
     ) -> None:
         _require(authorize)
         self._client, self._authorize, self._allowed = client, authorize, _Allowed.of(allow or AllowRule())
+        self._response_type = response_type
 
     async def _decide(self, request: R) -> Reply | None:
         # A raising or rejecting authorize is a refusal, never a crash and never a way through
@@ -530,9 +637,13 @@ class AsyncForwarder(Generic[R]):
             outcome = self._authorize(request)
             if inspect.isawaitable(outcome):
                 outcome = await outcome
+
+            # An awaitable answered by the awaited one is no response either: closed, so it is never left un-awaited
+            if inspect.iscoroutine(outcome):
+                outcome.close()
+            return _verdict(outcome, self._response_type)
         except Exception:
             return _denied()
-        return _verdict(outcome)
 
     async def ahandle(
         self,
@@ -543,6 +654,8 @@ class AsyncForwarder(Generic[R]):
         idempotency_key: str | None,
         read_body: Callable[[], Awaitable[bytes]],
     ) -> Reply:
+        """`Forwarder.handle` for async. The adapter should bound its own `read_body` at MAX_BODY_BYTES too, and must
+        `await aclose()` a streaming `Reply.body` on every exit path (see Reply)."""
         # [1] POST and JSON only, then the app's own decision
         refused = _precheck(method, content_type) or await self._decide(request)
         if refused is not None:
@@ -568,5 +681,5 @@ class AsyncForwarder(Generic[R]):
             opened = await client.chat.stream(params, idempotency_key=ask.idempotency_key)
             if opened.error is not None:
                 return _browser_error(opened.error)
-            return _streaming(opened.data.request_id, _arelay(opened.data))
+            return _streaming(opened.data.request_id, _AsyncBody(opened.data))
         return _buffered(await client.chat.create(params, idempotency_key=ask.idempotency_key))

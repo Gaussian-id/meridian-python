@@ -140,6 +140,23 @@ async def test_a_2xx_body_nested_too_deep_to_parse_is_a_network_error_never_a_ra
 
 
 @pytest.mark.fake_only
+async def test_params_nested_too_deep_to_encode_are_an_error_value_never_a_raise(mode: str, engine: Any) -> None:
+    deep: Any = []
+    for _ in range(100_000):
+        deep = [deep]
+    client = make_client(mode, engine)
+    created = await resolve(client.chat.create({'messages': [{'role': 'user', 'content': deep}]}))
+    streamed = await resolve(client.chat.stream({'messages': [{'role': 'user', 'content': deep}]}))
+    for result in (created, streamed):
+        assert (result.error.code, result.error.type, result.error.retryable) == (
+            'invalid_request',
+            'client_error',
+            False,
+        )
+    assert engine.requests == []
+
+
+@pytest.mark.fake_only
 async def test_async_client_works_as_a_context_manager_and_closes() -> None:
     engine = make_engine()
     transport: Any = engine.transport

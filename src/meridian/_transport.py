@@ -37,7 +37,8 @@ BASE_DELAY = 0.5
 MAX_JITTER = 0.25
 MAX_RETRY_AFTER = 30.0
 _SECONDS = re.compile(r'\d+(?:\.\d+)?')
-_SEND_ERRORS = (httpx.HTTPError, httpx.InvalidURL, UnicodeError)  # what a send may raise that becomes an Err
+# What building or sending a request may raise that becomes an Err (RecursionError: params too deep to encode)
+_SEND_ERRORS = (httpx.HTTPError, httpx.InvalidURL, UnicodeError, RecursionError)
 
 
 @dataclass(frozen=True)

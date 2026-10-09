@@ -40,6 +40,15 @@ def test_an_unknown_code_with_a_5xx_status_is_internal_and_not_retryable() -> No
     assert (error.code, error.status, error.retryable) == ('internal', 503, False)
 
 
+def test_an_unknown_code_keeps_the_engines_own_code_and_a_known_one_does_not() -> None:
+    unknown = '{"error":{"message":"m","type":"api_error","code":"brand_new","request_id":"r"}}'
+    known = '{"error":{"message":"m","type":"api_error","code":"internal","request_id":"r"}}'
+    new = error_from_body(402, 'h', unknown)
+    assert (new.code, new.engine_code, new.message) == ('internal', 'brand_new', 'm (engine code: brand_new)')
+    assert error_from_body(500, None, known).engine_code is None
+    assert error_from_body(502, None, 'not an envelope').engine_code is None
+
+
 def test_a_retryable_false_in_the_envelope_turns_retries_off() -> None:
     text = '{"error":{"message":"m","type":"api_error","code":"rate_limited","request_id":"r"},"retryable":false}'
     nested = '{"error":{"message":"m","type":"api_error","code":"rate_limited","request_id":"r","retryable":false}}'

@@ -86,6 +86,8 @@ class MeridianError:
     message: str
     retryable: bool
     request_id: str | None = None
+    # The engine's own code when this SDK does not recognise it (`code` is then `internal`); None for every other error
+    engine_code: str | None = None
 
 
 @dataclass(frozen=True)
@@ -142,7 +144,13 @@ def error_from_envelope(error: Mapping[str, Any], status: int | None = None) -> 
     resolved = status if status is not None else STATUS_BY_CODE.get(code, 0)
     retryable = code in RETRYABLE and error.get('retryable') is not False
     return MeridianError(
-        code, kind if kind in ENGINE_ERROR_TYPES else 'api_error', resolved, message, retryable, error.get('request_id')
+        code,
+        kind if kind in ENGINE_ERROR_TYPES else 'api_error',
+        resolved,
+        message,
+        retryable,
+        error.get('request_id'),
+        None if known else raw,
     )
 
 
