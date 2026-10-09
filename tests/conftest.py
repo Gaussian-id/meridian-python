@@ -27,3 +27,21 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
         for item in items:
             if 'fake_only' in item.keywords:
                 item.add_marker(skip)
+
+
+@pytest.fixture
+def clock(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """Fake timers: records every wait the SDK asks for and returns at once."""
+    waits: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        waits.append(seconds)
+
+    async def asleep(seconds: float) -> None:
+        waits.append(seconds)
+
+    import meridian._clock as clock_module
+
+    monkeypatch.setattr(clock_module, 'sleep', sleep)
+    monkeypatch.setattr(clock_module, 'asleep', asleep)
+    return waits

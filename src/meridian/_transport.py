@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import json
+import random
+import re
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any
 
 import httpx
 
+from . import _clock
 from ._config import DEFAULT_MAX_RETRIES, DEFAULT_TIMEOUT, sane_retries, sane_timeout
 from ._errors import Err, MeridianError, Ok, Result, client_error, config_error, error_from_body
 from ._version import __version__
@@ -17,14 +22,21 @@ _NO_BODY: Any = object()
 __all__ = [
     'DEFAULT_MAX_RETRIES',
     'DEFAULT_TIMEOUT',
+    'MAX_RETRY_AFTER',
     'AsyncRefusedTransport',
     'AsyncTransport',
     'Call',
     'RefusedTransport',
     'SyncTransport',
     'new_idempotency_key',
+    'next_wait',
+    'retry_after_seconds',
 ]
 
+BASE_DELAY = 0.5
+MAX_JITTER = 0.25
+MAX_RETRY_AFTER = 30.0
+_SECONDS = re.compile(r'\d+(?:\.\d+)?')
 _SEND_ERRORS = (httpx.HTTPError, httpx.InvalidURL, UnicodeError)  # what a send may raise that becomes an Err
 
 
@@ -41,6 +53,41 @@ class Call:
 
 def new_idempotency_key() -> str:
     return str(uuid.uuid4())
+
+
+def retry_after_seconds(value: str | None) -> float | None:
+    """`Retry-After` as plain decimal seconds or an HTTP date; None when absent, unreadable, zero or past."""
+    if not value or not value.strip():
+        return None
+    text = value.strip()
+    if _SECONDS.fullmatch(text):
+        seconds = float(text)
+    else:
+        try:
+            when = parsedate_to_datetime(text)
+        except (TypeError, ValueError):
+            return None
+        if when.tzinfo is None:
+            when = when.replace(tzinfo=timezone.utc)
+        seconds = (when - datetime.now(timezone.utc)).total_seconds()
+    return seconds if seconds > 0 else None
+
+
+def next_wait(tried: int, error: MeridianError, retry_after: str | None, call: Call, max_retries: int) -> float | None:
+    """Seconds to wait before the next attempt, or None to stop and return the error."""
+    # [1] A final error, a spent budget, or a call unsafe to repeat (unless the server refused it before running it)
+    if not error.retryable or tried >= max_retries:
+        return None
+    if not call.retry and error.code != 'rate_limited':
+        return None
+
+    # [2] A server asking for a long wait gets its answer now
+    wait = retry_after_seconds(retry_after)
+    if wait is not None:
+        return None if wait > MAX_RETRY_AFTER else wait
+
+    # [3] Exponential backoff with jitter
+    return BASE_DELAY * 2**tried + random.uniform(0, MAX_JITTER)
 
 
 class _Shared:
@@ -144,11 +191,18 @@ class SyncTransport:
         return None, error, retry_after
 
     def open(self, call: Call) -> Result[httpx.Response]:
-        response, error, _ = self._attempt(call)
-        if response is not None:
-            return Ok(response)
-        assert error is not None
-        return Err(error)
+        # [1] Attempt, backing off between retryable failures; the same Call (and key) every time
+        tried = 0
+        while True:
+            response, error, retry_after = self._attempt(call)
+            if response is not None:
+                return Ok(response)
+            assert error is not None
+            wait = next_wait(tried, error, retry_after, call, self._shared.max_retries)
+            if wait is None:
+                return Err(error)
+            _clock.sleep(wait)
+            tried += 1
 
     def json(self, call: Call) -> Result[Any]:
         # [1] The response, or the failure to get one
@@ -216,11 +270,18 @@ class AsyncTransport:
         return None, error, retry_after
 
     async def open(self, call: Call) -> Result[httpx.Response]:
-        response, error, _ = await self._attempt(call)
-        if response is not None:
-            return Ok(response)
-        assert error is not None
-        return Err(error)
+        # [1] Attempt, backing off between retryable failures; a CancelledError in the wait propagates
+        tried = 0
+        while True:
+            response, error, retry_after = await self._attempt(call)
+            if response is not None:
+                return Ok(response)
+            assert error is not None
+            wait = next_wait(tried, error, retry_after, call, self._shared.max_retries)
+            if wait is None:
+                return Err(error)
+            await _clock.asleep(wait)
+            tried += 1
 
     async def json(self, call: Call) -> Result[Any]:
         # [1] The response, or the failure to get one
