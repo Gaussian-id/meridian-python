@@ -1,5 +1,7 @@
 import json
 import re
+import subprocess
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -26,3 +28,19 @@ def test_generated_public_types_cover_the_chat_shapes() -> None:
 
     for name in ('ChatCompletionRequest', 'ChatCompletion', 'ChatCompletionChunk', 'ChatMessage', 'Usage', 'ModelList'):
         assert hasattr(public, name), name
+
+
+def test_meridian_imports_without_typing_extensions() -> None:
+    code = (
+        'import importlib.abc, sys\n'
+        'class Block(importlib.abc.MetaPathFinder):\n'
+        '    def find_spec(self, name, path=None, target=None):\n'
+        "        if name == 'typing_extensions':\n"
+        "            raise ImportError('typing_extensions is blocked')\n"
+        'sys.meta_path.insert(0, Block())\n'
+        "sys.modules.pop('typing_extensions', None)\n"
+        'import meridian\n'
+        "assert 'meridian._generated.public' not in sys.modules\n"
+    )
+    result = subprocess.run([sys.executable, '-c', code], capture_output=True, text=True, cwd=ROOT, check=False)
+    assert result.returncode == 0, result.stderr
