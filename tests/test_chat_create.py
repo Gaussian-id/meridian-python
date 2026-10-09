@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 pytestmark = pytest.mark.anyio
 
 
+@pytest.mark.fake_only
 async def test_create_returns_the_completion_and_three_token_counts(mode: str, engine: Any) -> None:
     engine.next(
         Scripted(
@@ -110,6 +111,7 @@ async def test_url_and_key_default_from_the_environment(
     assert result.error is None
 
 
+@pytest.mark.fake_only
 def test_a_result_narrows_on_error_is_none(engine: Any) -> None:
     # pyright strict checks this: `.data` is only reachable once `.error is None` has narrowed the union
     params: ChatParams = {'messages': MSG}

@@ -55,4 +55,7 @@ reportMissingTypeStubs = false
 testpaths = ["tests"]
 addopts = "-q"
 pythonpath = ["."]
-markers = ["fake_only: needs the in-memory fake engine; skipped in contract mode"]
+markers = [
+  "fake_only: needs the in-memory fake engine; skipped in contract mode",
+  "contract: needs the real local engine; skipped unless MERIDIAN_CONTRACT=1 (run scripts/contract.py)",
+]

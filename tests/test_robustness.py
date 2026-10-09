@@ -12,6 +12,8 @@ from tests.support.modes import make_client, resolve
 
 MSG: Any = [{'role': 'user', 'content': 'hi'}]
 
+pytestmark = pytest.mark.fake_only
+
 
 @pytest.mark.parametrize('url', ['http://[::1', 'http://host:abc', 'http://host:99999'])
 def test_a_malformed_url_is_a_config_error_never_a_raise(url: str, engine: Any) -> None:
