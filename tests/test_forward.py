@@ -2,9 +2,12 @@ import asyncio
 import gzip
 import inspect
 import json
+import threading
 from collections.abc import Callable, Coroutine
 from typing import Any, cast
 
+import anyio
+import httpx
 import pytest
 
 from meridian import AsyncMeridian, Meridian
@@ -57,7 +60,7 @@ async def send(
     content_type: str | None = 'application/json',
     key: str | None = None,
     request: Any = None,
-    read: Callable[[], bytes] | None = None,
+    read: Callable[[], Any] | None = None,
 ) -> Reply:
     raw = body if isinstance(body, bytes) else json.dumps(body).encode()
     reader = read or (lambda: raw)
@@ -655,7 +658,6 @@ BAD_CODES = [
     pytest.param(MISSING, id='missing'),
     pytest.param(None, id='null'),
     pytest.param(402, id='number'),
-    pytest.param('', id='empty'),
     pytest.param(True, id='bool'),
     pytest.param(['insufficient_credit'], id='list'),
     pytest.param({'code': 'insufficient_credit'}, id='object'),
@@ -717,14 +719,31 @@ async def test_an_error_status_whose_error_is_not_an_envelope_is_a_generic_503(
         *NOT_AN_ENVELOPE,
         pytest.param(envelope('insufficient_credit', 'req_200')['error'], id='hidden-code'),
         pytest.param(envelope('subscription_expired', 'req_200')['error'], id='unrecognised-code'),
+        # A known code that is not about the app's account is still no business of a 200: every non-null error is out
+        pytest.param(envelope('internal', 'req_200')['error'], id='internal'),
+        pytest.param(envelope('rate_limited', 'req_200')['error'], id='rate_limited'),
+        pytest.param(envelope('invalid_request', 'req_200')['error'], id='invalid_request'),
+        pytest.param(envelope('service_unavailable', 'req_200')['error'], id='service_unavailable'),
+        pytest.param(envelope('upstream_error')['error'], id='known-code-fresh-id'),
     ],
 )
 async def test_a_200_reply_with_an_error_key_is_a_generic_503(mode: str, engine: Any, error: Any) -> None:
     # The engine answers a failure with its error status, never a 200: a 200 that carries an error is not served on
-    engine.next(Scripted(json={**completion('hey'), 'error': error}))
+    engine.next(Scripted(headers={'x-request-id': 'req_hdr'}, json={**completion('hey'), 'error': error}))
     reply = await send(build(mode, engine), {'messages': MSG})
-    assert reply.status == 503 and payload(reply) == generic(carried_id(error))
+    expected = carried_id(error) or 'req_hdr'  # the error object's own id first, else the response's
+    assert reply.status == 503 and payload(reply) == generic(expected)
+    assert reply.headers == {'content-type': 'application/json', 'x-request-id': expected}
     assert isinstance(reply.body, bytes) and b'hey' not in reply.body and b'insufficient_credit' not in reply.body
+
+
+@pytest.mark.parametrize('error', ['boom', {'message': 'm'}])
+async def test_a_200_reply_with_an_error_and_no_id_of_its_own_keeps_the_responses_id(
+    mode: str, engine: Any, error: Any
+) -> None:
+    engine.next(Scripted(headers={'x-request-id': 'req_hdr'}, json={**completion('hey'), 'error': error}))
+    reply = await send(build(mode, engine), {'messages': MSG})
+    assert payload(reply) == generic('req_hdr') and reply.headers['x-request-id'] == 'req_hdr'
 
 
 async def test_a_200_reply_with_a_null_error_key_is_an_ordinary_reply(mode: str, engine: Any) -> None:
@@ -823,7 +842,7 @@ async def test_an_engine_internal_error_frame_passes_through_byte_for_byte(mode:
 
 @pytest.mark.parametrize('size', [1, 100_000])
 @pytest.mark.parametrize('code', BAD_CODES)
-async def test_a_mid_stream_error_frame_whose_code_is_missing_or_not_a_string_is_rewritten(
+async def test_a_mid_stream_error_object_with_a_bad_code_is_replaced_by_the_generic_frame_with_its_own_id(
     mode: str, engine: Any, code: object, size: int
 ) -> None:
     wire = frame(chunk('a')).encode() + f'data: {json.dumps({"error": bad_error(code)})}\n\n'.encode()
@@ -1051,3 +1070,380 @@ async def test_a_body_closed_after_it_finished_is_safe(mode: str, engine: Any) -
     await close_body(reply)
     await close_body(reply)
     assert engine.upstream_closed()
+
+
+# --- Closing while a read is waiting, and a read that ends badly ----------------------------------------------------
+
+
+async def test_aclose_while_a_read_is_waiting_never_raises_and_closes_upstream(engine: Any) -> None:
+    reply = await stream_reply('async', engine, [frame(chunk('a')).encode()], hang=True)
+    body = cast('AsyncReplyBody', reply.body)
+    seen: list[bytes] = []
+
+    async def reader() -> None:
+        async for piece in body:
+            seen.append(piece)
+
+    async with anyio.create_task_group() as group:
+        group.start_soon(reader)
+        while engine.parts_read() < 1:
+            await anyio.sleep(0.01)
+        await anyio.sleep(0.05)  # the reader now waits for a second piece inside the running relay
+        await body.aclose()  # used to raise: "aclose(): asynchronous generator is already running"
+        assert engine.upstream_closed()
+        await body.aclose()
+        group.cancel_scope.cancel()  # the fake never ends a hung read by itself
+    assert seen == [frame(chunk('a')).encode()]
+
+
+class _BlockingStream(httpx.SyncByteStream):
+    """One piece, then a read that waits until the response is closed (as a real connection read does)."""
+
+    def __init__(self) -> None:
+        self.waiting, self.release, self.closed = threading.Event(), threading.Event(), False
+
+    def __iter__(self) -> Any:
+        yield frame(chunk('a')).encode()
+        self.waiting.set()
+        self.release.wait(10)
+
+    def close(self) -> None:
+        self.closed = True
+        self.release.set()
+
+
+def test_close_while_a_read_is_waiting_never_raises_and_closes_upstream(engine: Any) -> None:
+    stream = _BlockingStream()
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(200, headers={'content-type': 'text/event-stream'}, stream=stream)
+    )
+    client = Meridian(engine.public_url, engine.project_key, transport=transport, max_retries=0)
+    reply = Forwarder[Any](client=client, authorize=allow_all).handle(
+        None,
+        method='POST',
+        content_type='application/json',
+        idempotency_key=None,
+        read_body=lambda: json.dumps({'messages': MSG, 'stream': True}).encode(),
+    )
+    body = cast('ReplyBody', reply.body)
+    outcome: list[object] = []
+
+    def read() -> None:
+        try:
+            outcome.extend(body)
+        except BaseException as exc:  # a reader that fails is a failed test, not a hung one
+            outcome.append(exc)
+
+    reader = threading.Thread(target=read)
+    reader.start()
+    assert stream.waiting.wait(10)  # the reader is inside the running relay
+    body.close()  # used to raise: "generator already executing"
+    body.close()
+    reader.join(10)
+    assert not reader.is_alive() and stream.closed
+    assert all(isinstance(piece, bytes) for piece in outcome)
+
+
+async def test_an_exception_mid_iteration_propagates_and_closes_upstream(mode: str, engine: Any) -> None:
+    parts = [frame(chunk('a')).encode(), frame(chunk('b')).encode()]
+    reply = await stream_reply(mode, engine, parts, fail_after=1)
+    body: Any = reply.body
+    if mode == 'sync':
+        assert next(body) == parts[0]
+        with pytest.raises(RuntimeError, match='boom'):
+            next(body)
+    else:
+        assert await body.__anext__() == parts[0]
+        with pytest.raises(RuntimeError, match='boom'):
+            await body.__anext__()
+    assert engine.upstream_closed()
+    await close_body(reply)  # a later close is a no-op
+    await close_body(reply)
+    assert engine.upstream_closed()
+
+
+async def test_cancelling_a_read_mid_iteration_propagates_and_closes_upstream(engine: Any) -> None:
+    reply = await stream_reply('async', engine, [frame(chunk('a')).encode()], hang=True)
+    body = cast('AsyncReplyBody', reply.body)
+    caught: list[type[BaseException]] = []
+
+    async def read() -> None:
+        try:
+            async for _ in body:
+                pass
+        except BaseException as exc:
+            caught.append(type(exc))
+            raise
+
+    with anyio.move_on_after(0.2) as scope:
+        await read()
+    assert scope.cancelled_caught and caught == [asyncio.CancelledError]
+    assert engine.upstream_closed()
+    await close_body(reply)  # a later close is a no-op
+    await close_body(reply)
+
+
+# --- The end-of-stream terminal frame keeps the frame's own id ------------------------------------------------------
+
+
+async def test_the_last_event_without_its_blank_line_with_a_bad_error_keeps_its_own_request_id(
+    mode: str, engine: Any
+) -> None:
+    wire = frame(chunk('a')).encode() + b'data: {"error":{"message":"m","request_id":"req_x"}}'
+    out = await drain(await stream_reply(mode, engine, [wire], headers={'x-request-id': 'req_h'}))
+    assert b'"m"' not in out and last_event(out) == generic('req_x')
+
+
+# --- A request id only reaches a header, or the body, when it is printable ASCII ------------------------------------
+
+BAD_IDS = [
+    pytest.param('a\r\nset-cookie: x=1', id='crlf'),
+    pytest.param('a\nb', id='lf'),
+    pytest.param('x' * 256, id='too-long'),
+    pytest.param('café', id='non-ascii'),
+]
+
+
+def wire_id(request_id: str) -> str:
+    """The header value as bytes, so even a non-ASCII id reaches the client (httpx accepts bytes at run time)."""
+    return cast('str', request_id.encode())
+
+
+def clean(reply: Reply) -> bool:
+    return 'x-request-id' not in reply.headers and not any('\r' in v or '\n' in v for v in reply.headers.values())
+
+
+@pytest.mark.parametrize('request_id', BAD_IDS)
+async def test_an_end_user_refusal_with_a_bad_request_id_drops_it_from_header_and_body(
+    mode: str, engine: Any, request_id: str
+) -> None:
+    body = envelope('rate_limited', request_id)
+    engine.next(Scripted(status=429, headers={'x-request-id': wire_id(request_id)}, json=body))
+    reply = await send(build(mode, engine), {'messages': MSG})
+    assert reply.status == 429 and clean(reply)
+    assert 'request_id' not in payload(reply)['error'] and b'set-cookie' not in cast('bytes', reply.body)
+
+
+@pytest.mark.parametrize('request_id', BAD_IDS)
+async def test_a_generic_503_with_a_bad_request_id_drops_it_from_header_and_body(
+    mode: str, engine: Any, request_id: str
+) -> None:
+    engine.next(
+        Scripted(
+            status=402,
+            headers={'x-request-id': wire_id(request_id)},
+            json=envelope('insufficient_credit', request_id),
+        )
+    )
+    reply = await send(build(mode, engine), {'messages': MSG})
+    assert reply.status == 503 and clean(reply) and payload(reply) == generic(None)
+
+
+@pytest.mark.parametrize('request_id', BAD_IDS)
+async def test_a_stream_reply_header_and_frames_never_carry_a_bad_request_id(
+    mode: str, engine: Any, request_id: str
+) -> None:
+    latin = wire_id(request_id)
+    frame_with_bad_id = (
+        f'data: {json.dumps({"error": {"message": "m", "code": "key_revoked", "request_id": request_id}})}\n\n'
+    )
+    wire = frame(chunk('a')).encode() + frame_with_bad_id.encode()
+    reply = await stream_reply(mode, engine, [wire], headers={'x-request-id': latin})
+    assert clean(reply)
+    out = await drain(reply)
+    assert last_event(out) == generic(None) and b'set-cookie' not in out
+
+
+async def test_a_bad_frame_id_falls_back_to_the_responses_valid_id(mode: str, engine: Any) -> None:
+    wire = frame(chunk('a')).encode() + hidden_frame('key_revoked').replace(b'req_mid', b'a\\r\\nb')
+    out = await drain(await stream_reply(mode, engine, [wire], headers={'x-request-id': 'req_h'}))
+    assert last_event(out) == generic('req_h')
+
+
+async def test_a_200_with_an_error_and_a_bad_id_takes_the_responses_valid_id(mode: str, engine: Any) -> None:
+    error = {'message': 'm', 'code': 'internal', 'request_id': 'a\r\nset-cookie: x=1'}
+    engine.next(Scripted(headers={'x-request-id': 'req_hdr'}, json={**completion('hey'), 'error': error}))
+    reply = await send(build(mode, engine), {'messages': MSG})
+    assert payload(reply) == generic('req_hdr') and reply.headers['x-request-id'] == 'req_hdr'
+
+
+async def test_a_200_with_an_error_and_only_bad_ids_has_no_id_at_all(mode: str, engine: Any) -> None:
+    error = {'message': 'm', 'code': 'internal', 'request_id': 'x' * 300}
+    engine.next(Scripted(headers={'x-request-id': ''}, json={**completion('hey'), 'error': error}))
+    reply = await send(build(mode, engine), {'messages': MSG})
+    assert reply.status == 503 and payload(reply) == generic(None) and 'x-request-id' not in reply.headers
+
+
+# --- response_type is checked when the forwarder is built --------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    'bad',
+    [
+        pytest.param(object, id='object'),
+        pytest.param(bool, id='bool'),
+        pytest.param(int, id='int'),
+        pytest.param((), id='empty-tuple'),
+        pytest.param((Reply, int), id='tuple-with-int'),
+        pytest.param((Reply, object), id='tuple-with-object'),
+        pytest.param((AppResponse, bool), id='tuple-with-bool'),
+        pytest.param('Reply', id='string'),
+        pytest.param(None, id='none'),
+        pytest.param(Reply(200), id='instance'),
+        pytest.param((Reply, 'AppResponse'), id='tuple-with-string'),
+        pytest.param([Reply], id='list'),
+    ],
+)
+def test_a_response_type_that_is_not_a_class_or_a_tuple_of_proper_classes_raises_at_construction(
+    engine: Any, bad: Any
+) -> None:
+    sync = Meridian(engine.public_url, engine.project_key, transport=engine.transport)
+    made = AsyncMeridian(engine.public_url, engine.project_key, transport=engine.transport)
+    with pytest.raises(TypeError, match='response_type'):
+        Forwarder[Any](client=sync, authorize=allow_all, response_type=bad)
+    with pytest.raises(TypeError, match='response_type'):
+        AsyncForwarder[Any](client=made, authorize=allow_all, response_type=bad)
+
+
+def test_proper_response_types_are_accepted(engine: Any) -> None:
+    client = Meridian(engine.public_url, engine.project_key, transport=engine.transport)
+    for good in (Reply, AppResponse, (Reply, AppResponse), (MoreSpecificResponse,)):
+        Forwarder[Any](client=client, authorize=allow_all, response_type=good)
+
+
+# --- read_body, and the public names ---------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    'value',
+    [
+        pytest.param('{"messages": [{"role": "user", "content": "hi"}]}', id='str'),
+        pytest.param(None, id='none'),
+        pytest.param(12, id='int'),
+        pytest.param(['x'], id='list'),
+        pytest.param({'messages': MSG}, id='dict'),
+    ],
+)
+async def test_a_read_body_that_does_not_give_bytes_is_400_and_never_raises(
+    mode: str, engine: Any, value: object
+) -> None:
+    reply = await send(build(mode, engine), b'', read=lambda: value)
+    assert reply.status == 400 and payload(reply)['error']['code'] == 'invalid_request' and engine.requests == []
+
+
+async def test_a_read_body_that_gives_a_bytearray_is_accepted(mode: str, engine: Any) -> None:
+    reply = await send(build(mode, engine), b'', read=lambda: bytearray(json.dumps({'messages': MSG}).encode()))
+    assert reply.status == 200 and len(engine.requests) == 1
+
+
+def test_the_module_lists_its_public_names() -> None:
+    import meridian.forward as forward
+
+    expected = {
+        'APP_CREDENTIAL_CODES',
+        'DEFAULT_MAX_TOKENS_CAP',
+        'GENERIC_MESSAGE',
+        'MAX_BODY_BYTES',
+        'MAX_BODY_DEPTH',
+        'MAX_EVENT_BYTES',
+        'AllowRule',
+        'AsyncForwarder',
+        'AsyncReplyBody',
+        'Forwarder',
+        'Reply',
+        'ReplyBody',
+    }
+    assert set(forward.__all__) == expected and all(hasattr(forward, name) for name in forward.__all__)
+
+
+# --- Stream content the guard cannot judge fails closed ---------------------------------------------------------------
+
+FIRST = frame(chunk('a')).encode()
+
+
+def closed_stream(request_id: str = 'req_h') -> bytes:
+    """The whole stream a browser sees when the guard gives up after one good chunk."""
+    return FIRST + b'\n\n' + b'data: ' + json.dumps(generic(request_id), separators=(',', ':')).encode() + b'\n\n'
+
+
+@pytest.mark.parametrize(
+    'bad',
+    [
+        pytest.param(b'event: error\ndata: {"id": "x", "choices": []}\n\n', id='event-error'),
+        pytest.param(b'event: ping\r\ndata: {"choices": []}\r\n\r\n', id='event-other-crlf'),
+        pytest.param(b'event: message\nevent: error\ndata: {"choices": []}\n\n', id='event-second-field'),
+        pytest.param(b'data: hello\n\n', id='data-not-json'),
+        pytest.param(b'data: {"choices":\n\n', id='data-truncated-json'),
+        pytest.param(b'data: [1, 2]\n\n', id='data-list'),
+        pytest.param(b'data: "text"\n\n', id='data-string'),
+        pytest.param(b'data: 5\n\n', id='data-number'),
+        pytest.param(b'data: NaN\n\n', id='data-nan'),
+        pytest.param(b'data: null\n\n', id='data-null'),
+        pytest.param(b'data: true\n\n', id='data-true'),
+        pytest.param(b'data: [DONE] \n\n', id='data-done-with-a-space'),
+        pytest.param(b'data:\n\n', id='data-empty'),
+        pytest.param(b'foo: bar\ndata: {"choices": []}\n\n', id='unknown-field'),
+        pytest.param(b'{\n\n"choices": []}\n\n', id='a-json-body-cut-by-a-blank-line'),
+    ],
+)
+async def test_content_the_guard_cannot_judge_ends_the_stream_closed(mode: str, engine: Any, bad: bytes) -> None:
+    after = frame(chunk('after')).encode() + frame('[DONE]').encode()
+    reply = await stream_reply(mode, engine, [FIRST, bad, after], headers={'x-request-id': 'req_h'})
+    out = await drain(reply)
+    assert b'after' not in out and b'[DONE]' not in out
+    assert out == closed_stream()
+    assert engine.upstream_closed() and engine.parts_read() == 2
+
+
+@pytest.mark.parametrize('size', [1, 5])
+async def test_content_the_guard_cannot_judge_ends_the_stream_closed_whatever_the_pieces(
+    mode: str, engine: Any, size: int
+) -> None:
+    wire = FIRST + b'event: error\ndata: {"choices": []}\n\n' + frame(chunk('after')).encode()
+    out = await drain(await stream_reply(mode, engine, pieces(wire, size), headers={'x-request-id': 'req_h'}))
+    assert out == closed_stream() and engine.upstream_closed()
+
+
+@pytest.mark.parametrize(
+    'rest',
+    [
+        pytest.param(b'{"choices": []}', id='json-body'),
+        pytest.param(b'{"error": {"code": "insufficient_credit", "message": "m"}}', id='json-error-body'),
+        pytest.param(b'{\n  "choices": []\n}\n', id='pretty-json-body'),
+        pytest.param(b'<html>bad gateway</html>', id='html'),
+        pytest.param(b': ping', id='unterminated-comment'),
+        pytest.param(b'id: 7', id='unterminated-id'),
+        pytest.param(b'event: message', id='unterminated-event'),
+    ],
+)
+async def test_an_upstream_body_that_ends_without_any_data_line_ends_the_stream_closed(
+    mode: str, engine: Any, rest: bytes
+) -> None:
+    out = await drain(await stream_reply(mode, engine, [FIRST, rest], headers={'x-request-id': 'req_h'}))
+    assert out == closed_stream() and engine.upstream_closed()
+
+
+async def test_a_non_sse_json_body_as_the_whole_reply_to_a_stream_request_ends_closed(mode: str, engine: Any) -> None:
+    body = json.dumps(completion('secret answer')).encode()
+    out = await drain(await stream_reply(mode, engine, [body], headers={'x-request-id': 'req_h'}))
+    assert b'secret answer' not in out and out.endswith(b'\n\n') and last_event(out) == generic('req_h')
+
+
+async def test_comments_ids_retry_and_message_events_still_pass_byte_for_byte(mode: str, engine: Any) -> None:
+    wire = (
+        b': keepalive\n\n'
+        + b'id: 7\nretry: 100\n: note\n'
+        + FIRST
+        + b'event: message\n'
+        + FIRST
+        + b'event:\r\ndata:'
+        + json.dumps(chunk('b')).encode()
+        + b'\r\n\r\n'
+        + b'data: [DONE]\n\n'
+    )
+    assert await drain(await stream_reply(mode, engine, pieces(wire, 3))) == wire
+
+
+async def test_a_trailing_comment_event_with_its_blank_line_passes(mode: str, engine: Any) -> None:
+    wire = FIRST + b'data: [DONE]\n\n' + b': done\n\n'
+    assert await drain(await stream_reply(mode, engine, [wire])) == wire

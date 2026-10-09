@@ -150,7 +150,7 @@ class _Shared:
             return Err(client_error('network_error', 'The response was not valid JSON.', response.status_code))
         if call.object_body and not isinstance(data, dict):
             return Err(client_error('network_error', 'The response was not a JSON object.', response.status_code))
-        return Ok[Any](data)
+        return Ok[Any](data, request_id=response.headers.get('x-request-id'))
 
 
 class SyncTransport:

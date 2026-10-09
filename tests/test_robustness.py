@@ -3,9 +3,9 @@ from typing import Any
 import httpx
 import pytest
 
-from meridian import Meridian, MeridianError
+from meridian import Meridian, MeridianError, Ok
 from meridian._errors import error_from_body
-from tests.support.fake_engine import Scripted
+from tests.support.fake_engine import Scripted, completion
 
 MSG: Any = [{'role': 'user', 'content': 'hi'}]
 
@@ -47,6 +47,13 @@ def test_an_unknown_code_keeps_the_engines_own_code_and_a_known_one_does_not() -
     assert (new.code, new.engine_code, new.message) == ('internal', 'brand_new', 'm (engine code: brand_new)')
     assert error_from_body(500, None, known).engine_code is None
     assert error_from_body(502, None, 'not an envelope').engine_code is None
+
+
+def test_a_results_response_request_id_is_not_part_of_its_identity(engine: Any) -> None:
+    engine.next(Scripted(headers={'x-request-id': 'req_ok'}, json=completion()))
+    result = Meridian(engine.public_url, engine.project_key, transport=engine.transport).chat.create({'messages': MSG})
+    assert isinstance(result, Ok) and result.request_id == 'req_ok'
+    assert Ok(1) == Ok(1, request_id='r') and 'req_ok' not in repr(result)
 
 
 def test_engine_code_changes_neither_equality_hash_nor_repr() -> None:

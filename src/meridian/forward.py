@@ -23,6 +23,21 @@ from ._stream import AsyncChatStream, ChatStream
 if TYPE_CHECKING:
     from .types import ChatParams
 
+__all__ = [
+    'APP_CREDENTIAL_CODES',
+    'DEFAULT_MAX_TOKENS_CAP',
+    'GENERIC_MESSAGE',
+    'MAX_BODY_BYTES',
+    'MAX_BODY_DEPTH',
+    'MAX_EVENT_BYTES',
+    'AllowRule',
+    'AsyncForwarder',
+    'AsyncReplyBody',
+    'Forwarder',
+    'Reply',
+    'ReplyBody',
+]
+
 R = TypeVar('R')
 C = TypeVar('C')
 
@@ -59,7 +74,7 @@ _OWNED_FIELDS = frozenset(
     {'model', 'stream', 'stream_options', 'messages', 'max_tokens', 'max_completion_tokens', 'temperature'}
 )
 _JSON_TYPE = re.compile(r'application/json\s*(?:;|$)', re.IGNORECASE)
-_BROWSER_KEY = re.compile(r'[ -~]{1,255}')
+_PRINTABLE = re.compile(r'[ -~]{1,255}')  # a browser's idempotency key, or an engine's request id
 _SSE_HEADERS = {'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-cache'}
 
 
@@ -119,9 +134,15 @@ def _dumps(value: Any) -> bytes:
     return json.dumps(value, separators=(',', ':')).encode()
 
 
+def _safe_id(value: object) -> str | None:
+    """An id from the engine, fit for a header and for the body: 1-255 printable ASCII characters, so never a line
+    break (header injection). Anything else is None, and the id is left out."""
+    return value if isinstance(value, str) and _PRINTABLE.fullmatch(value) else None
+
+
 def _json_reply(status: int, value: Any, request_id: str | None = None, extra: dict[str, str] | None = None) -> Reply:
     headers = {'content-type': 'application/json', **(extra or {})}
-    if request_id:
+    if request_id := _safe_id(request_id):
         headers['x-request-id'] = request_id
     return Reply(status, headers, _dumps(value))
 
@@ -133,7 +154,7 @@ def _generic(request_id: str | None) -> dict[str, Any]:
         'code': 'service_unavailable',
         'retryable': False,
     }
-    if request_id:
+    if request_id := _safe_id(request_id):
         error['request_id'] = request_id
     return {'error': error}
 
@@ -150,8 +171,8 @@ def _browser_error(error: MeridianError) -> Reply:
 
     # [2] Anything about the end user's own request keeps its real status and code
     body: dict[str, Any] = {'message': error.message, 'type': error.type, 'code': error.code}
-    if error.request_id:
-        body['request_id'] = error.request_id
+    if request_id := _safe_id(error.request_id):
+        body['request_id'] = request_id
     return _json_reply(error.status if error.status > 0 else 502, {'error': body}, error.request_id)
 
 
@@ -198,7 +219,7 @@ def _browser_key(value: str | None) -> str | None:
     """The browser's idempotency key: 1-255 printable ASCII characters once trimmed of spaces (a header value cannot
     start or end with one). Anything else is None, and the SDK makes a key of its own."""
     key = (value or '').strip(' ')
-    return key if _BROWSER_KEY.fullmatch(key) else None
+    return key if _PRINTABLE.fullmatch(key) else None
 
 
 def _client_for(option: object, kind: type[C]) -> C | None:
@@ -339,12 +360,17 @@ _LINE_BREAK = re.compile(r'\r\n|\r|\n')
 _BOM = chr(0xFEFF)  # a byte order mark opening the stream is not part of the first event
 _BACK_OFF = 3  # a blank line is at most 4 bytes: the last 3 are searched again when the next piece arrives
 _Verdict = Literal['pass', 'hide', 'terminal']
-_Judgement = Literal['pass', 'hide', 'terminal', 'not_json', 'unjudgeable']
+_Judgement = Literal['pass', 'hide', 'terminal', 'no_data', 'unjudgeable']
 _NUMBER = object()  # stands for any number in a judged event: its value never matters, but it is never null
 
 
 def _skip(_: str) -> object:
     return _NUMBER
+
+
+def _carried_id(error: Any) -> str | None:
+    """The request id an `error` value carries (only an object can), if it is fit to be shown."""
+    return _safe_id(cast('dict[str, Any]', error).get('request_id')) if isinstance(error, dict) else None
 
 
 def _error_verdict(value: Any) -> tuple[_Verdict, str | None]:
@@ -357,9 +383,8 @@ def _error_verdict(value: Any) -> tuple[_Verdict, str | None]:
         return 'pass', None
 
     # [2] A key that is set must be an object with a non-empty string code; anything else cannot be read: terminal
-    fields = cast('dict[str, Any]', error) if isinstance(error, dict) else {}
-    code, request_id = fields.get('code'), fields.get('request_id')
-    carried = request_id if isinstance(request_id, str) else None
+    code = cast('dict[str, Any]', error).get('code') if isinstance(error, dict) else None
+    carried = _carried_id(error)
     if not (isinstance(code, str) and code):
         return 'terminal', carried
 
@@ -370,40 +395,62 @@ def _error_verdict(value: Any) -> tuple[_Verdict, str | None]:
 
 
 def _judge(event: bytes, first: bool) -> tuple[_Judgement, str | None]:
-    """One event, as a browser would read it: passable, hidden or terminal (each with its request id), not JSON, or
-    unjudgeable."""
-    # [1] The data lines in any line ending, a value's one leading space dropped, the stream's BOM ignored
+    """One event, as a browser would read it: passable, hidden or terminal (each with its request id), without any
+    data (comments and ids only), or unjudgeable."""
+    # [1] Too large to read; otherwise the lines in any line ending, the stream's BOM ignored
     if len(event) > MAX_EVENT_BYTES:
         return 'unjudgeable', None
     text = event.decode('utf-8', 'replace')
     if first:
         text = text.removeprefix(_BOM)
-    lines = [line[5:].removeprefix(' ') for line in _LINE_BREAK.split(text) if line[:5] in ('data', 'data:')]
-    if not lines or lines == ['[DONE]']:
+
+    # [2] Only SSE fields the guard understands: data, a message event, id, retry and comments. Anything else (another
+    # event name, an unknown field, a body that is not SSE at all) cannot be judged
+    data: list[str] = []
+    for line in _LINE_BREAK.split(text):
+        if not line or line.startswith(':'):
+            continue
+        name, _, value = line.partition(':')
+        value = value.removeprefix(' ')  # a value's one leading space is dropped
+        if name == 'data':
+            data.append(value)
+        elif name == 'event':
+            if value not in ('', 'message'):
+                return 'terminal', None
+        elif name not in ('id', 'retry'):
+            return 'terminal', None
+    if not data:
+        return 'no_data', None
+    if data == ['[DONE]']:
         return 'pass', None
 
-    # [2] Numbers are never converted, so no number can make a frame unreadable here yet readable in a browser
+    # [3] The data must be a JSON object. Numbers are never converted, so no number can make a frame unreadable here
+    # yet readable in a browser
     try:
-        value: Any = json.loads('\n'.join(lines), parse_int=_skip, parse_float=_skip, parse_constant=_skip)
+        parsed: Any = json.loads('\n'.join(data), parse_int=_skip, parse_float=_skip, parse_constant=_skip)
     except RecursionError:
         return 'unjudgeable', None
     except ValueError:
-        return 'not_json', None
+        return 'terminal', None
+    if not isinstance(parsed, dict):
+        return 'terminal', None
 
-    # [3] An error key decides: ordinary, hidden, or terminal
-    return _error_verdict(value)
+    # [4] An error key decides: ordinary, hidden, or terminal
+    return _error_verdict(parsed)
 
 
 class _Guard:
     """Judges the engine's events before any byte reaches the browser; the same logic for sync and async.
 
     Only whole events go out: as they came, or the generic frame for a hidden code. An event that cannot be judged
-    (too large, too deep, or cut off) or whose `error` key is no envelope with a code ends the stream closed instead:
-    `closed` is set and nothing more may be read.
+    (too large, too deep, or cut off; an event name other than message; data that is not a JSON object; an unknown
+    field) or whose `error` key is no envelope with a code ends the stream closed instead: `closed` is set and nothing
+    more may be read. Comment, `id` and `retry` lines are allowed and forwarded as they came; a body that ends with
+    content holding no `data` line is not SSE and also ends closed.
     """
 
     def __init__(self, request_id: str | None) -> None:
-        self._request_id = request_id  # the response header's id, for a frame that carries none
+        self._request_id = _safe_id(request_id)  # the response header's id, for a frame that carries none
         self._buffer = bytearray()
         self._searched = 0
         self._first = True
@@ -437,13 +484,14 @@ class _Guard:
         # [1] The engine finished: a last event without its blank line is judged as it is
         rest = bytes(self._buffer)
         self._buffer.clear()
-        if not rest:
-            return b''
+        if not rest.strip(b'\r\n'):
+            return rest
         verdict, request_id = _judge(rest, self._first)
         if verdict == 'pass':
             return rest
 
-        # [2] A hidden one is replaced; one that cannot be read (cut off, unjudgeable, or terminal) fails closed
+        # [2] A hidden one is replaced; one that cannot be read (cut off, unjudgeable, terminal, or with no data line
+        # at the end of a body, such as a body that is not SSE) fails closed
         return _generic_frame(request_id or self._request_id) if verdict == 'hide' else self.fail(request_id)
 
     def fail(self, request_id: str | None = None) -> bytes:
@@ -523,10 +571,13 @@ class _Body:
         if self._closed:
             return
         self._closed = True
-        if self._relay is None:
-            self._stream.cancel()  # never started: close upstream directly
-        else:
-            self._relay.close()  # its `finally` closes upstream
+        if self._relay is not None:
+            try:
+                self._relay.close()  # its `finally` closes upstream
+                return
+            except (RuntimeError, ValueError):
+                pass  # a read is running in another thread, so the relay cannot be closed from here
+        self._stream.cancel()  # never started, or mid-read: close upstream directly
 
 
 class _AsyncBody:
@@ -551,16 +602,19 @@ class _AsyncBody:
         if self._closed:
             return
         self._closed = True
-        if self._relay is None:
-            await self._stream.cancel()  # never started: close upstream directly
-        else:
-            await self._relay.aclose()  # its `finally` closes upstream
+        if self._relay is not None:
+            try:
+                await self._relay.aclose()  # its `finally` closes upstream
+                return
+            except (RuntimeError, ValueError):
+                pass  # a read is waiting in another task, so the relay cannot be closed from here
+        await self._stream.cancel()  # never started, or mid-read: close upstream directly
 
 
 def _streaming(request_id: str | None, body: ReplyBody | AsyncReplyBody) -> Reply:
     # Headers are the route's own: the engine's content-encoding and content-length never describe these bytes
     headers = dict(_SSE_HEADERS)
-    if request_id:
+    if request_id := _safe_id(request_id):
         headers['x-request-id'] = request_id
     return Reply(200, headers, body)
 
@@ -570,11 +624,13 @@ def _buffered(result: Result[Any]) -> Reply:
         return _browser_error(result.error)
 
     # The engine answers a failure with its error status, never a 200: a 200 that carries an `error` key (other than
-    # null) is served on only as the generic 503, whatever the key holds
-    verdict, request_id = _error_verdict(result.data)
-    if verdict != 'pass':
+    # null) is served on only as the generic 503, whatever the key holds, with the error's own request id if it has a
+    # usable one, else the response's
+    data: Any = result.data
+    if isinstance(data, dict) and cast('dict[str, Any]', data).get('error') is not None:
+        request_id = _carried_id(cast('dict[str, Any]', data)['error']) or result.request_id
         return _json_reply(503, _generic(request_id), request_id)
-    return _json_reply(200, result.data)
+    return _json_reply(200, data)
 
 
 # --- The two helpers ------------------------------------------------------------------------------------------------
@@ -585,6 +641,19 @@ def _require(authorize: object) -> None:
         raise TypeError(
             'A forwarding helper needs an authorize(request) function: it decides who may spend your credit.'
         )
+
+
+def _response_types(value: object) -> type | tuple[type, ...]:
+    """`response_type` as given, once checked: a class, or a non-empty tuple of classes, none of them `object`, `bool`
+    or `int` (each would take a verdict that is no response, such as `False` or `1`, for the app's own response).
+    Like a missing `authorize`, a bad one is a mistake in the app's set-up and raises `TypeError` at construction."""
+    kinds = cast('tuple[object, ...]', value) if isinstance(value, tuple) else (value,)
+    if not kinds or not all(isinstance(kind, type) and kind not in (object, bool, int) for kind in kinds):
+        raise TypeError(
+            'response_type must be a class, or a non-empty tuple of classes, other than object, bool and int: '
+            "it says what counts as the app's own response."
+        )
+    return cast('type | tuple[type, ...]', value)
 
 
 class Forwarder(Generic[R]):
@@ -611,7 +680,7 @@ class Forwarder(Generic[R]):
     ) -> None:
         _require(authorize)
         self._client, self._authorize, self._allowed = client, authorize, _Allowed.of(allow or AllowRule())
-        self._response_type = response_type
+        self._response_type = _response_types(response_type)
 
     def _decide(self, request: R) -> Reply | None:
         # A raising authorize is a refusal, never a crash and never a way through
@@ -644,10 +713,12 @@ class Forwarder(Generic[R]):
 
         # [2] A valid body, of which only the allowed fields go on
         try:
-            raw = read_body()
+            raw = cast('object', read_body())
         except Exception:
             return _unreadable()
-        ask = _ask(raw, self._allowed, idempotency_key)
+        if not isinstance(raw, (bytes, bytearray)):
+            return _unreadable()
+        ask = _ask(bytes(raw), self._allowed, idempotency_key)
         if isinstance(ask, Reply):
             return ask
 
@@ -681,7 +752,7 @@ class AsyncForwarder(Generic[R]):
     ) -> None:
         _require(authorize)
         self._client, self._authorize, self._allowed = client, authorize, _Allowed.of(allow or AllowRule())
-        self._response_type = response_type
+        self._response_type = _response_types(response_type)
 
     async def _decide(self, request: R) -> Reply | None:
         # A raising or rejecting authorize is a refusal, never a crash and never a way through
@@ -715,10 +786,12 @@ class AsyncForwarder(Generic[R]):
 
         # [2] A valid body, of which only the allowed fields go on
         try:
-            raw = await read_body()
+            raw = cast('object', await read_body())
         except Exception:
             return _unreadable()
-        ask = _ask(raw, self._allowed, idempotency_key)
+        if not isinstance(raw, (bytes, bytearray)):
+            return _unreadable()
+        ask = _ask(bytes(raw), self._allowed, idempotency_key)
         if isinstance(ask, Reply):
             return ask
 

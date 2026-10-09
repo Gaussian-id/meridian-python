@@ -95,6 +95,8 @@ class MeridianError:
 class Ok(Generic[T]):
     data: T
     error: None = None
+    # The response's own x-request-id, when it had one: not part of the result's identity (not in `repr` or `==`)
+    request_id: str | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass(frozen=True)

@@ -63,7 +63,7 @@ def with_counts(result: Result[Any]) -> Result[Any]:
         return result
     data = dict(cast('dict[str, Any]', result.data))  # the transport guarantees an object (Call.object_body)
     data['usage'] = token_counts(data.get('usage'))
-    return Ok(data)
+    return Ok(data, request_id=result.request_id)
 
 
 class ChatApi:
