@@ -38,6 +38,7 @@ def chat_body(params: Mapping[str, Any], stream: bool) -> dict[str, Any]:
     return body
 
 
+_NOT_A_MAPPING = config_error('The chat params must be a mapping (a JSON object).')
 _BAD_KEY = config_error('idempotency_key must be 1-255 visible ASCII characters (no space or control character).')
 
 
@@ -52,6 +53,8 @@ def chat_call(params: Mapping[str, Any], idempotency_key: str | None) -> Call | 
     key = idempotency(idempotency_key)
     if isinstance(key, MeridianError):
         return key
+    if not isinstance(cast('object', params), Mapping):  # a type checker cannot see a caller's wrong type
+        return _NOT_A_MAPPING
     return Call(
         'POST',
         CHAT_PATH,
@@ -67,6 +70,8 @@ def stream_call(params: Mapping[str, Any], idempotency_key: str | None) -> Call 
     key = idempotency(idempotency_key)
     if isinstance(key, MeridianError):
         return key
+    if not isinstance(cast('object', params), Mapping):
+        return _NOT_A_MAPPING
     return Call('POST', CHAT_PATH, body=chat_body(params, True), idempotency_key=key)
 
 

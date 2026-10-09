@@ -90,7 +90,9 @@ class AsyncMeridian:
 
 _lock = threading.Lock()
 _shared: dict[tuple[str, str], Meridian] = {}
-# An httpx.AsyncClient belongs to the event loop it was used on: one per loop, dropped with the loop
+# An httpx.AsyncClient belongs to the event loop it was used on: one per loop. The loop is the weak key, but a client
+# that has been used refers back to its loop, so an entry can outlive a loop that nothing else holds: every access
+# also drops the entries of loops that are closed
 _async_shared: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, dict[tuple[str, str], AsyncMeridian]] = (
     weakref.WeakKeyDictionary()
 )
@@ -113,7 +115,11 @@ def shared_client(url: str | None = None, key: str | None = None) -> Meridian:
 
 def async_shared_client(url: str | None = None, key: str | None = None) -> AsyncMeridian:
     """`shared_client` for async code: one per settings and per running asyncio event loop. Called with no running
-    asyncio loop (another async library), it returns a new client each time."""
+    asyncio loop (trio, for one), it returns a new client each time, which nothing closes: under such a runtime pass
+    a `client=` of your own (built once, closed at shutdown) to the forwarder instead of relying on this default.
+
+    The clients of a loop that has since closed are dropped, not closed: their connections belong to that loop, which
+    can no longer run the close, and are released when the client is collected."""
     # [1] Settings that cannot work give a refusing client, never kept
     base, token = resolve_settings(url, key, PUBLIC)
     if refusal(base, token, None, None, PUBLIC, ASYNC_IO) is not None:
@@ -123,8 +129,10 @@ def async_shared_client(url: str | None = None, key: str | None = None) -> Async
     except RuntimeError:
         return AsyncMeridian(base, token)
 
-    # [2] Otherwise the one client for them on this loop, built once
+    # [2] Otherwise the one client for them on this loop, built once; the entries of closed loops are dropped first
     with _lock:
+        for old in [known for known in _async_shared if known.is_closed()]:
+            del _async_shared[old]
         clients = _async_shared.setdefault(loop, {})
         client = clients.get((base, token))
         if client is None:

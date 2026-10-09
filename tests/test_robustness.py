@@ -1,5 +1,5 @@
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 
 import httpx
 import pytest
@@ -11,6 +11,7 @@ from tests.support.fake_engine import Scripted, completion
 from tests.support.modes import make_client, resolve
 
 MSG: Any = [{'role': 'user', 'content': 'hi'}]
+LONG_S = chr(0x17F)  # the long s: Go's strings.EqualFold folds it to s
 
 pytestmark = pytest.mark.fake_only
 
@@ -130,6 +131,28 @@ async def test_a_deeply_nested_chat_reply_is_a_result_or_a_network_error_never_a
         assert (result.error.code, result.error.status) == ('network_error', 200)
 
 
+@pytest.mark.anyio
+async def test_a_reply_too_deep_to_decode_says_so_without_calling_it_invalid_json(mode: str, engine: Any) -> None:
+    text = '{"choices": [], "extra": ' + '[' * 100_000 + ']' * 100_000 + '}'
+    engine.next(Scripted(text=text, headers={'content-type': 'application/json'}))
+    result = await resolve(make_client(mode, engine, max_retries=0).chat.create({'messages': MSG}))
+    assert (result.error.code, result.error.status) == ('network_error', 200)
+    assert result.error.message == 'The response could not be decoded.'
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize('call', ['create', 'stream'])
+@pytest.mark.parametrize('params', cast('list[Any]', [None, 'messages', 5, [('messages', [])], ['messages'], object()]))
+async def test_chat_params_that_are_no_mapping_are_an_error_value_and_nothing_is_sent(
+    mode: str, engine: Any, call: str, params: Any
+) -> None:
+    chat = make_client(mode, engine).chat
+    result = await resolve(getattr(chat, call)(params))
+    assert result.data is None
+    assert (result.error.code, result.error.type, result.error.retryable) == ('invalid_request', 'client_error', False)
+    assert engine.requests == []
+
+
 ERROR_MEMBERS = [
     pytest.param('boom', None, id='string'),
     pytest.param({}, None, id='empty-object'),
@@ -211,6 +234,15 @@ CASE_VARIANTS = [
     pytest.param({**completion('hey'), 'Error': 'x'}, id='top-level-Error'),
     pytest.param({**completion('hey'), 'ERROR': None}, id='top-level-ERROR-null'),
     pytest.param({**completion('hey'), 'CHOICES': []}, id='top-level-CHOICES'),
+    # Go's strings.EqualFold folds U+017F (long s) to s, which lower() does not
+    pytest.param({**completion('hey'), 'choice' + LONG_S: []}, id='top-level-choice-long-s'),
+    pytest.param(
+        {
+            **completion('hey'),
+            'error': {'message': 'm', 'me' + LONG_S * 2 + 'age': 'x', 'type': 'api_error', 'code': 'internal'},
+        },
+        id='message-long-s-inside-error',
+    ),
 ]
 
 

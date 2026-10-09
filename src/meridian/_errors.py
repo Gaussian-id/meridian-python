@@ -157,7 +157,9 @@ _INSIDE_ERROR = ('message', 'type', 'code', 'request_id')
 
 
 def _has_case_variant(fields: Mapping[Any, Any], names: tuple[str, ...]) -> bool:
-    return any(isinstance(key, str) and key not in names and key.lower() in names for key in fields)
+    # casefold, not lower: Go's strings.EqualFold also folds the long s (U+017F) to s, so `choice` + long s is `choices`
+    # to it
+    return any(isinstance(key, str) and key not in names and key.casefold() in names for key in fields)
 
 
 def error_member(value: Any) -> dict[str, Any] | object | None:

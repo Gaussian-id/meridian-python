@@ -691,6 +691,24 @@ async def test_a_passed_through_rate_limit_relays_a_valid_retry_after(
     assert reply.headers.get('retry-after') == (value.strip() if relayed else None)
 
 
+@pytest.mark.parametrize('status', [400, 429])
+@pytest.mark.parametrize(
+    'value',
+    [
+        'Mon, 01 Jan 99999999999999999999 00:00:00 GMT',
+        'Mon, 01 Jan 0000 00:00:00 GMT',
+        'Mon, 01 Jan 0001 00:00:00 +1400',
+    ],
+)
+async def test_an_absurd_retry_after_date_never_makes_the_forwarder_raise(
+    mode: str, engine: Any, value: str, status: int
+) -> None:
+    code = 'invalid_request' if status == 400 else 'rate_limited'
+    engine.next(Scripted(status=status, headers={'retry-after': value}, json=envelope(code, 'req_ra')))
+    reply = await send(build(mode, engine), {'messages': MSG})
+    assert reply.status == status and payload(reply)['error']['code'] == code
+
+
 @pytest.mark.parametrize(
     ('code', 'status'),
     [('insufficient_credit', 402), ('hard_limit_reached', 429), ('service_unavailable', 503), ('internal', 500)],
@@ -899,6 +917,39 @@ async def test_a_200_reply_with_a_null_error_key_is_an_ordinary_reply(mode: str,
     engine.next(Scripted(json={**completion('hey'), 'error': None}))
     reply = await send(build(mode, engine), {'messages': MSG})
     assert reply.status == 200 and payload(reply)['choices'][0]['message']['content'] == 'hey'
+
+
+# A reply the client decoded may still not encode for the browser: nested past the encoder's depth (on a Python whose
+# decoder allows more), or holding a NaN (valid to decode, no JSON to send). Either is the generic 503, never a raise
+@pytest.mark.parametrize('extra', [pytest.param('NaN', id='nan'), pytest.param('[Infinity]', id='infinity')])
+async def test_a_buffered_reply_holding_a_nan_is_a_generic_503_with_the_replys_id(
+    mode: str, engine: Any, extra: str
+) -> None:
+    text = '{"choices": [], "extra": ' + extra + '}'
+    engine.next(Scripted(text=text, headers={'content-type': 'application/json', 'x-request-id': 'req_enc'}))
+    reply = await send(build(mode, engine), {'messages': MSG})
+    assert reply.status == 503 and payload(reply) == generic('req_enc')
+    assert reply.headers == {'content-type': 'application/json', 'x-request-id': 'req_enc'}
+
+
+@pytest.mark.parametrize(
+    'extra',
+    [
+        pytest.param('{"a": ' * 10_000 + '1' + '}' * 10_000, id='10000-dicts'),
+        pytest.param('[' * 16_000 + ']' * 16_000, id='16000-lists'),
+    ],
+)
+async def test_a_buffered_reply_nested_too_deep_to_encode_is_a_generic_503(mode: str, engine: Any, extra: str) -> None:
+    # Where the client's decoder refuses it (older Pythons) it is a network error; where it decodes it, the encoder
+    # for the browser refuses it. Either way the browser sees the generic 503 and the call never raises
+    text = '{"choices": [], "extra": ' + extra + '}'
+    engine.next(Scripted(text=text, headers={'content-type': 'application/json', 'x-request-id': 'req_enc'}))
+    reply = await send(build(mode, engine), {'messages': MSG})
+    error = payload(reply)['error']
+    assert (
+        reply.status == 503 and error['code'] == 'service_unavailable' and error.get('request_id') in (None, 'req_enc')
+    )
+    assert isinstance(reply.body, bytes) and b'choices' not in reply.body
 
 
 # --- Streaming ------------------------------------------------------------------------------------------------------
@@ -1341,6 +1392,67 @@ async def test_other_settings_get_another_shared_client(mode: str, monkeypatch: 
     assert len(set(recorder.senders)) == 2
 
 
+UNUSABLE = [
+    pytest.param({'url': None, 'key': None}, id='nothing-set'),
+    pytest.param({'url': 'ftp://engine.test', 'key': 'gmr_' + '7' * 64}, id='bad-scheme'),
+    pytest.param({'url': 'http://engine.test', 'key': ''}, id='empty-key'),
+]
+
+
+@pytest.mark.parametrize('settings', UNUSABLE)
+def test_an_unusable_configuration_is_never_cached(settings: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+    from meridian._client import shared_client
+
+    monkeypatch.delenv('MERIDIAN_URL', raising=False)
+    monkeypatch.delenv('MERIDIAN_KEY', raising=False)
+    first, second = shared_client(**settings), shared_client(**settings)
+    assert first is not second
+    assert first.models.list().error is not None  # refused, nothing sent
+
+
+@pytest.mark.parametrize('settings', UNUSABLE)
+async def test_an_unusable_configuration_is_never_cached_for_async_either(
+    settings: dict[str, Any], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from meridian._client import async_shared_client
+
+    monkeypatch.delenv('MERIDIAN_URL', raising=False)
+    monkeypatch.delenv('MERIDIAN_KEY', raising=False)
+    first, second = async_shared_client(**settings), async_shared_client(**settings)
+    assert first is not second
+    assert (await first.models.list()).error is not None
+
+
+async def test_a_usable_configuration_is_cached_once_it_is_fixed(mode: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    from meridian._client import async_shared_client, shared_client
+
+    make = shared_client if mode == 'sync' else async_shared_client
+    monkeypatch.delenv('MERIDIAN_URL', raising=False)
+    monkeypatch.delenv('MERIDIAN_KEY', raising=False)
+    assert make() is not make()
+    monkeypatch.setenv('MERIDIAN_URL', f'http://fixed-{mode}.engine.test')
+    monkeypatch.setenv('MERIDIAN_KEY', 'gmr_' + '8' * 64)
+    assert make() is make()
+
+
+def test_closed_event_loops_do_not_pile_up_in_the_shared_async_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    from meridian import _client  # pyright: ignore[reportPrivateUsage]  (the cache itself is what is under test)
+
+    Recorder(monkeypatch)
+    monkeypatch.setenv('MERIDIAN_URL', 'http://pileup.engine.test')
+    monkeypatch.setenv('MERIDIAN_KEY', 'gmr_' + '9' * 64)
+    fwd = default_forwarder('async')
+    loops: list[asyncio.AbstractEventLoop] = []  # held, as a framework may: a closed loop that is still referred to
+
+    async def use() -> int:
+        loops.append(asyncio.get_running_loop())
+        assert (await send(fwd, {'messages': MSG})).status == 200
+        return len(_client._async_shared)  # pyright: ignore[reportPrivateUsage]
+
+    sizes = [asyncio.run(use()) for _ in range(4)]
+    assert sizes == [1, 1, 1, 1] and all(loop.is_closed() for loop in loops)
+
+
 def test_each_event_loop_gets_its_own_shared_async_client(monkeypatch: pytest.MonkeyPatch) -> None:
     recorder = Recorder(monkeypatch)
     monkeypatch.setenv('MERIDIAN_URL', 'http://loops.engine.test')
@@ -1614,6 +1726,79 @@ async def test_a_read_body_that_gives_a_bytearray_is_accepted(mode: str, engine:
     assert reply.status == 200 and len(engine.requests) == 1
 
 
+class _Source:
+    """A body source that is an iterable of its own, not an iterator: it has a `close` that its iterator lacks (as a
+    framework's request-body object does). `close_raises` makes closing fail."""
+
+    def __init__(self, pieces: list[bytes], *, close_raises: bool = False) -> None:
+        self.pieces, self.close_raises, self.closed = pieces, close_raises, 0
+
+    def __iter__(self) -> Iterator[bytes]:
+        return iter(self.pieces)
+
+    async def _gen(self) -> AsyncIterator[bytes]:
+        for piece in self.pieces:
+            yield piece
+
+    def __aiter__(self) -> AsyncIterator[bytes]:
+        return self._gen()
+
+    def close(self) -> None:
+        self.closed += 1
+        if self.close_raises:
+            raise RuntimeError('close failed')
+
+    async def aclose(self) -> None:
+        self.close()
+
+
+@pytest.mark.parametrize('close_raises', [False, True])
+@pytest.mark.parametrize('over', [False, True])
+async def test_the_iterable_read_body_returned_is_closed_on_success_and_on_413(
+    mode: str, engine: Any, over: bool, close_raises: bool
+) -> None:
+    raw = json.dumps({'messages': MSG}).encode()
+    pieces = [b'x' * (MAX_BODY_BYTES + 1)] if over else [raw[:5], raw[5:]]
+    source = _Source(pieces, close_raises=close_raises)
+    reply = await send(build(mode, engine), b'', read=lambda: source)
+    # Closing is best-effort: a close that raises changes neither the answer nor the promise never to raise
+    assert source.closed == 1
+    assert reply.status == (413 if over else 200) and (len(engine.requests) == 0) == over
+
+
+async def test_a_read_body_that_is_its_own_iterator_is_closed_once(mode: str, engine: Any) -> None:
+    closes: list[str] = []
+
+    class Gen:
+        def __init__(self) -> None:
+            self.left = [json.dumps({'messages': MSG}).encode()]
+
+        def __iter__(self) -> 'Gen':
+            return self
+
+        def __next__(self) -> bytes:
+            if not self.left:
+                raise StopIteration
+            return self.left.pop()
+
+        def __aiter__(self) -> 'Gen':
+            return self
+
+        async def __anext__(self) -> bytes:
+            if not self.left:
+                raise StopAsyncIteration
+            return self.left.pop()
+
+        def close(self) -> None:
+            closes.append('close')
+
+        async def aclose(self) -> None:
+            closes.append('aclose')
+
+    reply = await send(build(mode, engine), b'', read=Gen)
+    assert reply.status == 200 and closes == ['close' if mode == 'sync' else 'aclose']
+
+
 def test_the_module_lists_its_public_names() -> None:
     import meridian.forward as forward
 
@@ -1739,7 +1924,27 @@ async def test_a_reply_with_a_case_variant_is_a_generic_503(mode: str, engine: A
     assert b'insufficient_credit' not in body and b'rate_limited' not in body and b'key_revoked' not in body
 
 
-@pytest.mark.parametrize('bad', [pytest.param(P1, id='P1'), pytest.param(P1B, id='P1b')])
+LONG_S_BODY = {
+    'error': {
+        'message': 'm',
+        'me' + chr(0x17F) * 2 + 'age': 'x',
+        'type': 'rate_limit_error',
+        'code': 'insufficient_credit',
+    }
+}
+
+
+@pytest.mark.parametrize('status', [200, 402])
+async def test_a_reply_with_a_long_s_case_variant_is_a_generic_503(mode: str, engine: Any, status: int) -> None:
+    # Go's strings.EqualFold folds U+017F (long s) to s: `me<long s><long s>age` is `message` to such a reader
+    engine.next(Scripted(status=status, headers={'x-request-id': 'req_h'}, json=LONG_S_BODY))
+    reply = await send(build(mode, engine), {'messages': MSG})
+    assert reply.status == 503 and payload(reply) == generic('req_h')
+
+
+@pytest.mark.parametrize(
+    'bad', [pytest.param(P1, id='P1'), pytest.param(P1B, id='P1b'), pytest.param(LONG_S_BODY, id='long-s')]
+)
 async def test_a_frame_with_a_case_variant_ends_the_stream_closed(mode: str, engine: Any, bad: Any) -> None:
     after = frame(chunk('after')).encode() + frame('[DONE]').encode()
     reply = await stream_reply(mode, engine, [FIRST, frame(bad).encode(), after], headers={'x-request-id': 'req_h'})

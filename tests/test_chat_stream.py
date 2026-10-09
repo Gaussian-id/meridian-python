@@ -11,6 +11,7 @@ from tests.support.fake_engine import Scripted, chunk, engine_error, envelope, f
 from tests.support.modes import make_client, resolve
 
 MSG: list[Any] = [{'role': 'user', 'content': 'hi'}]
+LONG_S = chr(0x17F)  # the long s: Go's strings.EqualFold folds it to s
 pytestmark = [pytest.mark.anyio, pytest.mark.fake_only]
 
 
@@ -195,6 +196,11 @@ P1B_FRAME = {'error': {'message': 'm', 'type': 'rate_limit_error', 'code': 'insu
         pytest.param(P1_FRAME, id='P1'),
         pytest.param(P1B_FRAME, id='P1b'),
         pytest.param({**chunk('x'), 'Error': 'boom'}, id='top-level-Error'),
+        pytest.param({**chunk('x'), 'choice' + LONG_S: []}, id='top-level-choice-long-s'),
+        pytest.param(
+            {'error': {'message': 'm', 'me' + LONG_S * 2 + 'age': 'x', 'type': 'api_error', 'code': 'internal'}},
+            id='message-long-s-inside-error',
+        ),
         pytest.param({'error': {'message': 'm'}, **chunk('x')}, id='error-without-a-code-beside-choices'),
         pytest.param({'error': 'boom', **chunk('x')}, id='error-string-beside-choices'),
     ],

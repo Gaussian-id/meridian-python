@@ -54,6 +54,9 @@ MAX_ERROR_BODY_BYTES = 1 << 20
 MAX_REPLY_BYTES = 64 << 20
 _SECONDS = re.compile(r'\d+(?:\.\d+)?')
 _DELTA_SECONDS = re.compile(r'\d+')
+# What reading an HTTP date may raise: a malformed one (TypeError, ValueError), a year no datetime holds (OverflowError,
+# from the parser or from the arithmetic on a date at the edge of the range)
+_BAD_DATE = (TypeError, ValueError, OverflowError)
 # The engine's rule for an idempotency key (meridian-domain ids.rs): 1-255 characters, each visible ASCII 0x21-0x7E
 _IDEMPOTENCY_KEY = re.compile(r'[!-~]{1,255}')
 # What building or sending a request may raise that becomes an Err: a body or URL that cannot be encoded (TypeError,
@@ -94,7 +97,7 @@ def valid_retry_after(value: str | None) -> str | None:
         return text
     try:
         parsedate_to_datetime(text)
-    except (TypeError, ValueError):
+    except _BAD_DATE:
         return None
     return text
 
@@ -109,11 +112,11 @@ def retry_after_seconds(value: str | None) -> float | None:
     else:
         try:
             when = parsedate_to_datetime(text)
-        except (TypeError, ValueError):
+            if when.tzinfo is None:
+                when = when.replace(tzinfo=timezone.utc)
+            seconds = (when - datetime.now(timezone.utc)).total_seconds()
+        except _BAD_DATE:
             return None
-        if when.tzinfo is None:
-            when = when.replace(tzinfo=timezone.utc)
-        seconds = (when - datetime.now(timezone.utc)).total_seconds()
     return seconds if seconds > 0 else None
 
 
@@ -250,13 +253,14 @@ class _Shared:
 
     @staticmethod
     def decode(call: Call, response: httpx.Response, raw: bytes | None) -> Result[Any]:
-        # [1] Over the cap, not JSON, or nested deeper than the parser allows (RecursionError): a transport failure
+        # [1] Over the cap, not JSON, or nested deeper than the parser allows (RecursionError): a transport failure.
+        # The message does not say which of the last two: a body too deep to decode is not known to be invalid JSON
         status, header_id = response.status_code, response.headers.get('x-request-id')
         if raw is None:
             return _Shared.too_large(response)
         data: Any = load_json(raw.decode('utf-8', 'replace'))
         if data is NOT_JSON:
-            return Err(client_error('network_error', 'The response was not valid JSON.', status))
+            return Err(client_error('network_error', 'The response could not be decoded.', status))
         if data is None:  # a literal null is nothing: no call takes it for a result
             return Err(client_error('network_error', 'The response was empty (JSON null).', status))
 

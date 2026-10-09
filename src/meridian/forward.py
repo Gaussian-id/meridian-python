@@ -7,6 +7,7 @@ credit is ever shown to the browser.
 
 from __future__ import annotations
 
+import contextlib
 import inspect
 import json
 import math
@@ -27,7 +28,16 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Generic, Literal, Protocol, TypeVar, cast, runtime_checkable
 
 from ._client import AsyncMeridian, Meridian, async_shared_client, shared_client
-from ._errors import STATUS_BY_CODE, MeridianError, Result, config_error, error_member, load_json, valid_request_id
+from ._errors import (
+    STATUS_BY_CODE,
+    MeridianError,
+    Result,
+    client_error,
+    config_error,
+    error_member,
+    load_json,
+    valid_request_id,
+)
 from ._stream import AsyncChatStream, ChatStream
 from ._transport import valid_idempotency_key
 
@@ -132,6 +142,9 @@ class Reply(Generic[B]):
     every exit path: `reply.close()` (sync) or `await reply.aclose()` (async), or the body's own `close()` /
     `aclose()`, even when it never started iterating (the browser left before the first read). Closing is idempotent,
     a finished body allows it, and closing a reply whose body is `bytes` does nothing.
+
+    Under pyright strict, a bare local `reply = Reply(200)` is a `Reply[Unknown]` (the body type cannot be inferred
+    from the defaults): annotate it (`reply: Reply[ReplyBody] = Reply(200)`) or return it straight away.
     """
 
     status: int
@@ -156,7 +169,8 @@ class Reply(Generic[B]):
 
 
 def _dumps(value: Any) -> bytes:
-    return json.dumps(value, separators=(',', ':')).encode()
+    # Strict: NaN and infinity are no JSON (ValueError), and a value nested past the encoder's depth is a RecursionError
+    return json.dumps(value, separators=(',', ':'), allow_nan=False).encode()
 
 
 def _safe_id(value: object) -> str | None:
@@ -280,9 +294,31 @@ def _take(gathered: bytearray, piece: object) -> Reply[Any] | None:
     return _too_large() if len(gathered) > MAX_BODY_BYTES else None
 
 
+def _close_quietly(*things: object) -> None:
+    """Close each of these that has a `close()`, once each: best-effort, a close that raises changes nothing."""
+    seen: list[object] = []
+    for thing in things:
+        close = getattr(thing, 'close', None)
+        if callable(close) and not any(thing is done for done in seen):
+            seen.append(thing)
+            with contextlib.suppress(Exception):
+                close()
+
+
+async def _aclose_quietly(*things: object) -> None:
+    """`_close_quietly` for async sources: each one's `aclose()`."""
+    seen: list[object] = []
+    for thing in things:
+        aclose = getattr(thing, 'aclose', None)
+        if callable(aclose) and not any(thing is done for done in seen):
+            seen.append(thing)
+            with contextlib.suppress(Exception):
+                await cast('Callable[[], Awaitable[object]]', aclose)()
+
+
 def _read(read_body: Callable[[], object]) -> bytes | Reply[Any]:
-    """The browser's body from `read_body`: its bytes, or a chunk source read up to the cap and closed. A raise, or
-    anything that gives no bytes, is a 400."""
+    """The browser's body from `read_body`: its bytes, or a chunk source read up to the cap and closed (the iterable
+    it returned and its iterator, whichever has a `close()`). A raise, or anything that gives no bytes, is a 400."""
     try:
         # [1] Plain bytes, already in memory
         source = read_body()
@@ -290,16 +326,15 @@ def _read(read_body: Callable[[], object]) -> bytes | Reply[Any]:
             return _too_large() if len(source) > MAX_BODY_BYTES else bytes(source)
 
         # [2] Chunks, read only until the cap is passed; the source is closed whatever happens
-        pieces = iter(cast('Iterable[object]', source))
+        pieces: object = None
         gathered = bytearray()
         try:
+            pieces = iter(cast('Iterable[object]', source))
             for piece in pieces:
                 if refused := _take(gathered, piece):
                     return refused
         finally:
-            close = getattr(pieces, 'close', None)
-            if callable(close):
-                close()
+            _close_quietly(pieces, source)
         return bytes(gathered)
     except Exception:
         return _unreadable()
@@ -317,16 +352,15 @@ async def _aread(read_body: Callable[[], object]) -> bytes | Reply[Any]:
             return _unreadable()
 
         # [2] Chunks, read only until the cap is passed; the source is closed whatever happens
-        pieces = aiter(cast('AsyncIterable[object]', source))
+        pieces: object = None
         gathered = bytearray()
         try:
+            pieces = aiter(cast('AsyncIterable[object]', source))
             async for piece in pieces:
                 if refused := _take(gathered, piece):
                     return refused
         finally:
-            aclose = getattr(pieces, 'aclose', None)
-            if callable(aclose):
-                await cast('Callable[[], Awaitable[object]]', aclose)()
+            await _aclose_quietly(pieces, source)
         return bytes(gathered)
     except Exception:
         return _unreadable()
@@ -714,7 +748,13 @@ def _buffered(result: Result[Any]) -> Reply[Any]:
     # own valid request id), which is the generic 503 here like every SDK-side failure
     if result.error is not None:
         return _browser_error(result.error)
-    return _json_reply(200, result.data, result.request_id)
+
+    # A reply the client decoded may still not encode again for the browser (nested past the encoder's depth on a
+    # Python whose decoder allows more, or holding a NaN): it fails like any SDK-side failure, keeping the reply's id
+    try:
+        return _json_reply(200, result.data, result.request_id)
+    except (ValueError, RecursionError):
+        return _browser_error(client_error('network_error', 'The reply could not be encoded.', 200, result.request_id))
 
 
 # --- The two helpers ------------------------------------------------------------------------------------------------
@@ -792,8 +832,11 @@ class Forwarder(Generic[R]):
     ) -> Reply[ReplyBody]:
         """Answer one browser request. `read_body` is called only after `authorize` said yes. It returns the body's
         chunks (any iterable of bytes, such as a generator over the framework's input stream), which are read only up
-        to MAX_BODY_BYTES: past it the answer is 413, nothing more is read, and the source is closed. Plain bytes
-        already in memory are fine too. A streaming body must be closed by the caller (see Reply)."""
+        to MAX_BODY_BYTES: past it the answer is 413, nothing more is read, and the source is closed (the iterable
+        returned and its iterator, each that has a `close()`; a close that raises is ignored). Plain bytes already in
+        memory are fine too. An adapter should pass a generator over `stream.read(65536)`, not the file-like object
+        itself: iterating a file by lines can deliver the whole body as one huge chunk before the cap is checked.
+        A streaming body must be closed by the caller (see Reply)."""
         # [1] POST and JSON only, then the app's own decision
         refused = _precheck(method, content_type) or self._decide(request)
         if refused is not None:
@@ -825,8 +868,10 @@ class Forwarder(Generic[R]):
 class AsyncForwarder(Generic[R]):
     """Forwarder for an async framework; see `Forwarder`. `client` is an AsyncMeridian or a function returning one
     (the function should return one long-lived shared client, closed by the app at shutdown; the forwarder never closes
-    it); without one, a shared client per settings and per running event loop is used. `authorize` may be async: it is
-    awaited once, and an awaitable it returns is a 403, not a yes."""
+    it); without one, a shared client per settings and per running asyncio event loop is used. Under another async
+    runtime (trio) there is no asyncio loop, so that default builds a new client for every request and nothing closes
+    it: pass `client=` there. `authorize` may be async: it is awaited once, and an awaitable it returns is a 403, not
+    a yes."""
 
     def __init__(
         self,
@@ -866,7 +911,10 @@ class AsyncForwarder(Generic[R]):
     ) -> Reply[AsyncReplyBody]:
         """`Forwarder.handle` for async. `read_body` returns the body's chunks as an async iterable (such as the
         framework's request stream), read only up to MAX_BODY_BYTES, or plain bytes; a coroutine or a sync iterable
-        gives no body (400). A streaming body must be closed with `await reply.aclose()` on every exit path."""
+        gives no body (400). The iterable returned and its iterator are closed with `aclose()` (each that has one).
+        Give it an async generator over `stream.read(65536)` rather than a file-like object iterated by lines, which
+        can deliver the whole body as one huge chunk. A streaming body must be closed with `await reply.aclose()` on
+        every exit path."""
         # [1] POST and JSON only, then the app's own decision
         refused = _precheck(method, content_type) or await self._decide(request)
         if refused is not None:

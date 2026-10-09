@@ -41,7 +41,7 @@ async def test_retry_after_is_honoured(mode: str, engine: Any, clock: list[float
     assert clock == [2.0]
 
 
-@pytest.mark.parametrize('value', ['3600', '31'])
+@pytest.mark.parametrize('value', ['3600', '31', 'Fri, 31 Dec 9999 23:59:59 GMT'])
 async def test_a_wait_longer_than_30_s_returns_the_error_at_once(
     mode: str, engine: Any, clock: list[float], value: str
 ) -> None:
@@ -50,7 +50,14 @@ async def test_a_wait_longer_than_30_s_returns_the_error_at_once(
     assert result.error.code == 'rate_limited' and result.error.request_id and clock == []
 
 
-@pytest.mark.parametrize('value', ['0', ' ', '1e3', '0x10', 'Wed, 21 Oct 2015 07:28:00 GMT', '-5'])
+ABSURD_DATES = [
+    'Mon, 01 Jan 99999999999999999999 00:00:00 GMT',  # a year no datetime holds: used to raise OverflowError
+    'Mon, 01 Jan 0000 00:00:00 GMT',  # year 0
+    'Mon, 01 Jan 0001 00:00:00 +1400',  # before the epoch, near the smallest date
+]
+
+
+@pytest.mark.parametrize('value', ['0', ' ', '1e3', '0x10', 'Wed, 21 Oct 2015 07:28:00 GMT', '-5', *ABSURD_DATES])
 async def test_odd_retry_after_values_fall_back_to_backoff_with_jitter(
     mode: str, engine: Any, clock: list[float], value: str
 ) -> None:
@@ -100,6 +107,34 @@ def test_a_future_http_date_is_a_wait() -> None:
     date = format_datetime(datetime.now(timezone.utc) + timedelta(seconds=10), usegmt=True)
     assert 8 < (retry_after_seconds(date) or 0) <= 10
     assert retry_after_seconds(None) is None
+
+
+@pytest.mark.parametrize('value', ABSURD_DATES)
+def test_an_absurd_http_date_is_no_wait_and_never_raises(value: str) -> None:
+    from meridian._transport import retry_after_seconds, valid_retry_after
+
+    assert retry_after_seconds(value) is None
+    assert valid_retry_after(value) in (None, value)  # a date the engine could send or not: only a raise is wrong
+
+
+@pytest.mark.parametrize('value', ABSURD_DATES)
+@pytest.mark.parametrize('status', [400, 429])
+async def test_an_absurd_retry_after_is_an_error_value_from_every_client(
+    mode: str, engine: Any, clock: list[float], value: str, status: int
+) -> None:
+    from meridian.admin import AsyncMeridianAdmin, MeridianAdmin
+
+    code = 'invalid_request' if status == 400 else 'rate_limited'
+    scripted = [Scripted(status=status, headers={'retry-after': value}, json=engine_error(code).json)] * 3
+    engine.next(*scripted)
+    result = await resolve(make_client(mode, engine).models.list())
+    assert result.data is None and result.error.code == code
+
+    engine.next(*scripted)
+    admin_cls = MeridianAdmin if mode == 'sync' else AsyncMeridianAdmin
+    admin = admin_cls(engine.admin_url, engine.integrator_key, transport=engine.transport)
+    listed = await resolve(admin.orgs.list())
+    assert listed.data is None and listed.error.code == code
 
 
 # --- A retry answered with idempotency_conflict -------------------------------------------------------------------
