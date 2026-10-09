@@ -54,4 +54,5 @@ reportMissingTypeStubs = false
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+pythonpath = ["."]
 markers = ["fake_only: needs the in-memory fake engine; skipped in contract mode"]
