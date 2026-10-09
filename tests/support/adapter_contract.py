@@ -43,6 +43,9 @@ class Harness(Protocol):
     """One framework's route, built over the fake engine and driven the way a browser would drive it."""
 
     engine: Any
+    # The server reads the whole request body before the route runs (Django under ASGI spools it to a file): the cap
+    # then bounds what the route reads, not what the browser sends
+    spools_the_body: bool
 
     def own_response(self, status: int, data: dict[str, Any]) -> object:
         """The framework's own JSON response, which an `authorize` may return."""
@@ -135,7 +138,8 @@ async def an_oversized_body_is_413_without_draining_it(h: Harness) -> None:
 
     wire = await h.send(body=endless())
     assert wire.status == 413 and wire.json()['error']['code'] == 'body_too_large'
-    assert 9 <= pulled <= 10  # the 9th MiB passes the 8 MiB cap, and no further chunk is asked for
+    if not h.spools_the_body:
+        assert 9 <= pulled <= 10  # the 9th MiB passes the 8 MiB cap, and no further chunk is asked for
     assert h.engine.requests == []
 
 

@@ -112,6 +112,8 @@ async def drive(
 
 
 class FastApiHarness:
+    spools_the_body = False
+
     def __init__(self, engine: Any, spec_version: str) -> None:
         self.engine = engine
         self.spec_version = spec_version
