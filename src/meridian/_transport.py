@@ -9,7 +9,7 @@ from typing import Any
 import httpx
 
 from ._config import DEFAULT_MAX_RETRIES, DEFAULT_TIMEOUT, sane_retries, sane_timeout
-from ._errors import Err, MeridianError, Ok, Result, client_error, error_from_body
+from ._errors import Err, MeridianError, Ok, Result, client_error, config_error, error_from_body
 from ._version import __version__
 
 _NO_BODY: Any = object()
@@ -101,6 +101,8 @@ class SyncTransport:
             response = self._client.send(self._shared.request(self._client, call), stream=True)
         except httpx.HTTPError as exc:
             return None, self._shared.failure(exc), None
+        except (httpx.InvalidURL, UnicodeError) as exc:  # a URL or header httpx cannot encode: our setup, not the wire
+            return None, config_error(f'The request could not be built: {exc}'), None
         if response.is_success:
             return response, None, None
 

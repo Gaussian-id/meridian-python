@@ -69,15 +69,9 @@ STATUS_BY_CODE: Final[Mapping[str, int]] = {
     'deadline_exceeded': 504,
 }
 
-KNOWN_TYPES: Final = frozenset(
-    {
-        'invalid_request_error',
-        'authentication_error',
-        'permission_error',
-        'rate_limit_error',
-        'api_error',
-        'client_error',
-    }
+# The five types an engine envelope may claim; `client_error` is the SDK's own and never comes off the wire
+ENGINE_ERROR_TYPES: Final = frozenset(
+    {'invalid_request_error', 'authentication_error', 'permission_error', 'rate_limit_error', 'api_error'}
 )
 RETRYABLE: Final = frozenset(
     {'rate_limited', 'upstream_unavailable', 'service_unavailable', 'deadline_exceeded', 'network_error'}
@@ -119,7 +113,7 @@ def config_error(message: str) -> MeridianError:
     return MeridianError('invalid_request', 'client_error', 0, message, False)
 
 
-def parse_envelope(text: str) -> dict[str, str] | None:
+def parse_envelope(text: str) -> dict[str, Any] | None:
     """The engine's `error` object, or None when the text is not Meridian's envelope."""
     try:
         value: Any = json.loads(text) if text else None
@@ -129,23 +123,26 @@ def parse_envelope(text: str) -> dict[str, str] | None:
     if isinstance(error, dict):
         fields = cast('dict[str, Any]', error)
         if isinstance(fields.get('code'), str) and isinstance(fields.get('message'), str):
-            return {k: v for k, v in fields.items() if isinstance(v, str)}
+            kept: dict[str, Any] = {k: v for k, v in fields.items() if isinstance(v, str)}
+            if fields.get('retryable') is False:
+                kept['retryable'] = False
+            return kept
     return None
 
 
-def error_from_envelope(error: Mapping[str, str], status: int | None = None) -> MeridianError:
+def error_from_envelope(error: Mapping[str, Any], status: int | None = None) -> MeridianError:
     # [1] A code this SDK does not know (a newer engine) is reported as internal, and its raw code kept in the message
     raw = error['code']
     known = raw in STATUS_BY_CODE
     code = raw if known else 'internal'
     message = error['message'] if known else f'{error["message"]} (engine code: {raw})'
-    kind = error.get('type', 'api_error')
+    kind: str = error.get('type', 'api_error')
 
     # [2] Status from the response, or from the code when it arrived in a stream frame
     resolved = status if status is not None else STATUS_BY_CODE.get(code, 0)
-    retryable = code in RETRYABLE or (not known and resolved >= 500)
+    retryable = code in RETRYABLE and error.get('retryable') is not False
     return MeridianError(
-        code, kind if kind in KNOWN_TYPES else 'api_error', resolved, message, retryable, error.get('request_id')
+        code, kind if kind in ENGINE_ERROR_TYPES else 'api_error', resolved, message, retryable, error.get('request_id')
     )
 
 

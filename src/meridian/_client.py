@@ -37,8 +37,13 @@ class Meridian:
         http_client: httpx.Client | None = None,
         transport: httpx.BaseTransport | None = None,
     ) -> None:
+        """`http_client` and `transport` are mutually exclusive; passing both is a configuration error."""
         url, key = resolve_settings(url, key)
-        refused = refusal(url, key)
+        refused = refusal(url, key) or (
+            config_error('Pass http_client or transport, not both: transport would be ignored.')
+            if http_client is not None and transport is not None
+            else None
+        )
         self._transport: RefusedTransport | SyncTransport = (
             RefusedTransport(refused)
             if refused

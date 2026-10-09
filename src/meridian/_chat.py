@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
-from ._errors import Ok, Result
+from ._errors import Err, Ok, Result, client_error
 from ._stream import token_counts
 from ._transport import Call, new_idempotency_key
 
@@ -35,7 +35,10 @@ def idempotency(key: str | None) -> dict[str, str]:
 def with_counts(result: Result[Any]) -> Result[Any]:
     if result.error is not None:
         return result
-    data = dict(result.data)
+    payload: Any = result.data
+    if not isinstance(payload, dict):
+        return Err(client_error('network_error', 'The response was not a JSON object.', 200))
+    data = dict(cast('dict[str, Any]', payload))
     data['usage'] = token_counts(data.get('usage'))
     return Ok(data)
 

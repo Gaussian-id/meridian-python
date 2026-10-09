@@ -3,6 +3,8 @@ from __future__ import annotations
 import math
 from urllib.parse import urlsplit
 
+import httpx
+
 from ._errors import MeridianError, config_error
 
 DEFAULT_TIMEOUT = 60.0
@@ -26,7 +28,12 @@ def sane_retries(value: object) -> int:
 
 
 def url_refusal(url: str | None, what: str) -> MeridianError | None:
-    parts = urlsplit(url or '')
+    try:
+        parts = urlsplit(url or '')
+        parts.port  # noqa: B018  (reading it validates the port)
+        httpx.URL(url or '')
+    except (ValueError, httpx.InvalidURL):
+        return config_error(f'{what} must be an absolute http(s) URL.')
     if parts.scheme in ('http', 'https') and parts.netloc:
         return None
     return config_error(f'{what} must be an absolute http(s) URL.')
