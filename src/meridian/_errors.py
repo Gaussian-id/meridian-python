@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any, Final, Generic, TypeVar, Union, cast
 
 T = TypeVar('T')
@@ -86,8 +86,9 @@ class MeridianError:
     message: str
     retryable: bool
     request_id: str | None = None
-    # The engine's own code when this SDK does not recognise it (`code` is then `internal`); None for every other error
-    engine_code: str | None = None
+    # The engine's own code when this SDK does not recognise it (`code` is then `internal`); None for every other
+    # error. Not part of the error's identity: it appears in neither `repr` nor `==`.
+    engine_code: str | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass(frozen=True)

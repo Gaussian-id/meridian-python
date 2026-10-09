@@ -2,7 +2,7 @@ import asyncio
 import gzip
 import inspect
 import json
-from collections.abc import AsyncIterator, Callable, Coroutine
+from collections.abc import Callable, Coroutine
 from typing import Any, cast
 
 import pytest
@@ -14,8 +14,10 @@ from meridian.forward import (
     MAX_EVENT_BYTES,
     AllowRule,
     AsyncForwarder,
+    AsyncReplyBody,
     Forwarder,
     Reply,
+    ReplyBody,
 )
 from tests.support.fake_engine import Scripted, chunk, completion, engine_error, envelope, frame
 from tests.support.modes import resolve
@@ -87,12 +89,11 @@ def generic(request_id: str | None) -> dict[str, Any]:
 
 
 async def drain(reply: Reply) -> bytes:
-    body: Any = reply.body
+    body = reply.body
     if isinstance(body, bytes):
         return body
-    if isinstance(body, AsyncIterator):
-        stream = cast('AsyncIterator[bytes]', body)
-        return b''.join([piece async for piece in stream])
+    if isinstance(body, AsyncReplyBody):
+        return b''.join([piece async for piece in body])
     return b''.join(body)
 
 
@@ -649,6 +650,37 @@ async def test_an_engine_internal_error_is_a_known_code_and_passes_through_uncha
     }
 
 
+MISSING = object()
+BAD_CODES = [
+    pytest.param(MISSING, id='missing'),
+    pytest.param(None, id='null'),
+    pytest.param(402, id='number'),
+    pytest.param('', id='empty'),
+    pytest.param(True, id='bool'),
+    pytest.param(['insufficient_credit'], id='list'),
+    pytest.param({'code': 'insufficient_credit'}, id='object'),
+]
+
+
+def bad_error(code: object) -> dict[str, Any]:
+    """An error object the engine never sends: its `code` is missing, empty or not a string."""
+    error: dict[str, Any] = {'message': 'the app account 42 is out', 'type': 'api_error', 'request_id': 'req_bad'}
+    if code is not MISSING:
+        error['code'] = code
+    return error
+
+
+@pytest.mark.parametrize('stream', [False, True], ids=['buffered', 'before-the-stream'])
+@pytest.mark.parametrize('code', BAD_CODES)
+async def test_an_error_whose_code_is_missing_or_not_a_string_is_a_generic_503(
+    mode: str, engine: Any, code: object, stream: bool
+) -> None:
+    engine.next(Scripted(status=402, headers={'x-request-id': 'req_bad'}, json={'error': bad_error(code)}))
+    reply = await send(build(mode, engine), {'messages': MSG, 'stream': stream})
+    assert reply.status == 503 and payload(reply) == generic('req_bad')
+    assert isinstance(reply.body, bytes) and b'account 42' not in reply.body
+
+
 # --- Streaming ------------------------------------------------------------------------------------------------------
 
 
@@ -735,6 +767,23 @@ async def test_an_unrecognised_engine_code_in_a_mid_stream_frame_is_rewritten(
 async def test_an_engine_internal_error_frame_passes_through_byte_for_byte(mode: str, engine: Any) -> None:
     wire = frame(chunk('a')).encode() + hidden_frame('internal')
     assert await drain(await stream_reply(mode, engine, pieces(wire, 5))) == wire
+
+
+@pytest.mark.parametrize('size', [1, 100_000])
+@pytest.mark.parametrize('code', BAD_CODES)
+async def test_a_mid_stream_error_frame_whose_code_is_missing_or_not_a_string_is_rewritten(
+    mode: str, engine: Any, code: object, size: int
+) -> None:
+    wire = frame(chunk('a')).encode() + f'data: {json.dumps({"error": bad_error(code)})}\n\n'.encode()
+    out = await drain(await stream_reply(mode, engine, pieces(wire, size)))
+    assert out.startswith(frame(chunk('a')).encode()) and b'account 42' not in out
+    assert last_event(out) == generic('req_bad')
+
+
+async def test_a_mid_stream_error_frame_without_any_code_or_id_takes_the_response_id(mode: str, engine: Any) -> None:
+    wire = frame(chunk('a')).encode() + b'data: {"error": {}}\n\n'
+    out = await drain(await stream_reply(mode, engine, [wire], headers={'x-request-id': 'req_h'}))
+    assert last_event(out) == generic('req_h')
 
 
 @pytest.mark.parametrize('size', [1, 7, 100_000])
@@ -842,12 +891,26 @@ async def test_an_event_just_under_the_byte_cap_passes_through(mode: str, engine
     assert await drain(await stream_reply(mode, engine, pieces(wire, 1024 * 1024))) == wire
 
 
-async def close_body(mode: str, reply: Reply) -> None:
-    body: Any = reply.body
-    if mode == 'sync':
+async def close_body(reply: Reply) -> None:
+    # What an adapter does on every exit path: no getattr and no cast, the body type says which close it has
+    body = reply.body
+    if isinstance(body, ReplyBody):
         body.close()
-    else:
+    elif isinstance(body, AsyncReplyBody):
         await body.aclose()
+
+
+async def test_a_streaming_body_is_the_closable_type_of_its_mode(mode: str, engine: Any) -> None:
+    reply = await stream_reply(mode, engine, [frame('[DONE]').encode()])
+    assert isinstance(reply.body, ReplyBody) is (mode == 'sync')
+    assert isinstance(reply.body, AsyncReplyBody) is (mode == 'async')
+    await close_body(reply)
+    assert engine.upstream_closed()
+
+
+async def test_a_buffered_body_is_bytes_and_neither_closable_type(mode: str, engine: Any) -> None:
+    reply = await send(build(mode, engine), {'messages': MSG})
+    assert isinstance(reply.body, bytes) and not isinstance(reply.body, (ReplyBody, AsyncReplyBody))
 
 
 async def test_a_browser_disconnect_closes_upstream(mode: str, engine: Any) -> None:
@@ -856,9 +919,9 @@ async def test_a_browser_disconnect_closes_upstream(mode: str, engine: Any) -> N
     body: Any = reply.body
     first = next(body) if mode == 'sync' else await body.__anext__()
     assert not engine.upstream_closed()
-    await close_body(mode, reply)
+    await close_body(reply)
     assert first == parts[0] and engine.upstream_closed()
-    await close_body(mode, reply)  # a second close is a no-op
+    await close_body(reply)  # a second close is a no-op
     assert engine.upstream_closed()
 
 
@@ -868,14 +931,14 @@ async def test_a_body_closed_before_it_started_closes_upstream(mode: str, engine
     parts = [frame(chunk('a')).encode(), frame('[DONE]').encode()]
     reply = await stream_reply(mode, engine, parts)
     assert not engine.upstream_closed()
-    await close_body(mode, reply)
+    await close_body(reply)
     assert engine.upstream_closed() and engine.parts_read() == 0
 
 
 async def test_a_body_closed_twice_before_it_started_is_safe_and_reads_nothing(mode: str, engine: Any) -> None:
     reply = await stream_reply(mode, engine, [frame(chunk('a')).encode(), frame('[DONE]').encode()])
-    await close_body(mode, reply)
-    await close_body(mode, reply)
+    await close_body(reply)
+    await close_body(reply)
     assert engine.upstream_closed() and await drain(reply) == b''
 
 
@@ -883,6 +946,6 @@ async def test_a_body_closed_after_it_finished_is_safe(mode: str, engine: Any) -
     wire = frame(chunk('a')).encode() + frame('[DONE]').encode()
     reply = await stream_reply(mode, engine, [wire])
     assert await drain(reply) == wire
-    await close_body(mode, reply)
-    await close_body(mode, reply)
+    await close_body(reply)
+    await close_body(reply)
     assert engine.upstream_closed()

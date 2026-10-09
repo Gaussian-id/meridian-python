@@ -14,7 +14,7 @@ import re
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Generator, Iterable, Iterator, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Generic, Literal, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Generic, Literal, Protocol, TypeVar, cast, runtime_checkable
 
 from ._client import AsyncMeridian, Meridian
 from ._errors import STATUS_BY_CODE, MeridianError, Result, config_error
@@ -72,19 +72,43 @@ class AllowRule:
     options: Sequence[str] = ()
 
 
+@runtime_checkable
+class ReplyBody(Protocol):
+    """A streaming body for a sync framework: iterate it for the bytes, and `close()` it on every exit path."""
+
+    def __iter__(self) -> Iterator[bytes]: ...
+
+    def __next__(self) -> bytes: ...
+
+    def close(self) -> None: ...
+
+
+@runtime_checkable
+class AsyncReplyBody(Protocol):
+    """A streaming body for an async framework: `async for` it for the bytes, and `await aclose()` it on every exit
+    path."""
+
+    def __aiter__(self) -> AsyncIterator[bytes]: ...
+
+    async def __anext__(self) -> bytes: ...
+
+    async def aclose(self) -> None: ...
+
+
 @dataclass(frozen=True)
 class Reply:
     """What a framework adapter sends back. `passthrough` is set (and nothing else) when `authorize` answered with
     the app's own response.
 
-    A streaming `body` holds the engine's response open from the moment the Reply exists, so the caller must close
-    it on every exit path: `close()` (sync) or `await aclose()` (async), even when it never started iterating
-    (the browser left before the first read). Closing is idempotent; a finished body needs no closing but allows it.
+    A streaming `body` (a `ReplyBody` from `Forwarder`, an `AsyncReplyBody` from `AsyncForwarder`) holds the engine's
+    response open from the moment the Reply exists, so the caller must close it on every exit path: `close()` (sync)
+    or `await aclose()` (async), even when it never started iterating (the browser left before the first read).
+    Closing is idempotent; a finished body needs no closing but allows it. Any other body is plain `bytes`.
     """
 
     status: int
     headers: dict[str, str] = field(default_factory=lambda: {})
-    body: bytes | Iterator[bytes] | AsyncIterator[bytes] = b''
+    body: bytes | ReplyBody | AsyncReplyBody = b''
     passthrough: object | None = None
 
 
@@ -341,13 +365,14 @@ def _judge(event: bytes, first: bool) -> tuple[_Judgement, str | None]:
     except ValueError:
         return 'not_json', None
 
-    # [3] Hidden when it is an error about the app's own key, account or credit, or whose code this SDK does not know
+    # [3] An error envelope passes only with a code this SDK knows that is not about the app's own key, account or
+    # credit; a missing, empty or non-string code, or an unrecognised one, is hidden
     error: Any = cast('dict[str, Any]', value).get('error') if isinstance(value, dict) else None
     if not isinstance(error, dict):
         return 'pass', None
     fields = cast('dict[str, Any]', error)
     code, request_id = fields.get('code'), fields.get('request_id')
-    if not isinstance(code, str) or (code in STATUS_BY_CODE and code not in APP_CREDENTIAL_CODES):
+    if isinstance(code, str) and code in STATUS_BY_CODE and code not in APP_CREDENTIAL_CODES:
         return 'pass', None
     return 'hide', request_id if isinstance(request_id, str) else None
 
@@ -457,8 +482,8 @@ async def _arelay(stream: AsyncChatStream) -> AsyncGenerator[bytes, None]:
 
 
 class _Body:
-    """The relay as a body the caller can always close. The engine's response is open before the first read, and a
-    generator closed before it started never runs its `finally`, so the unstarted case is closed here instead."""
+    """The relay as a `ReplyBody` the caller can always close. The engine's response is open before the first read, and
+    a generator closed before it started never runs its `finally`, so the unstarted case is closed here instead."""
 
     def __init__(self, stream: ChatStream) -> None:
         self._stream = stream
@@ -486,7 +511,7 @@ class _Body:
 
 
 class _AsyncBody:
-    """`_Body` for async: `aclose()` is safe at any point and any number of times."""
+    """`_Body` as an `AsyncReplyBody`: `aclose()` is safe at any point and any number of times."""
 
     def __init__(self, stream: AsyncChatStream) -> None:
         self._stream = stream
@@ -513,7 +538,7 @@ class _AsyncBody:
             await self._relay.aclose()  # its `finally` closes upstream
 
 
-def _streaming(request_id: str | None, body: Iterator[bytes] | AsyncIterator[bytes]) -> Reply:
+def _streaming(request_id: str | None, body: ReplyBody | AsyncReplyBody) -> Reply:
     # Headers are the route's own: the engine's content-encoding and content-length never describe these bytes
     headers = dict(_SSE_HEADERS)
     if request_id:

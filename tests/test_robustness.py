@@ -3,7 +3,7 @@ from typing import Any
 import httpx
 import pytest
 
-from meridian import Meridian
+from meridian import Meridian, MeridianError
 from meridian._errors import error_from_body
 from tests.support.fake_engine import Scripted
 
@@ -47,6 +47,14 @@ def test_an_unknown_code_keeps_the_engines_own_code_and_a_known_one_does_not() -
     assert (new.code, new.engine_code, new.message) == ('internal', 'brand_new', 'm (engine code: brand_new)')
     assert error_from_body(500, None, known).engine_code is None
     assert error_from_body(502, None, 'not an envelope').engine_code is None
+
+
+def test_engine_code_changes_neither_equality_hash_nor_repr() -> None:
+    plain = MeridianError('internal', 'api_error', 500, 'm', False, 'r')
+    marked = MeridianError('internal', 'api_error', 500, 'm', False, 'r', 'brand_new')
+    assert plain == marked and hash(plain) == hash(marked)
+    assert 'brand_new' not in repr(marked) and 'engine_code' not in repr(marked)
+    assert marked.engine_code == 'brand_new' and plain.engine_code is None
 
 
 def test_a_retryable_false_in_the_envelope_turns_retries_off() -> None:
