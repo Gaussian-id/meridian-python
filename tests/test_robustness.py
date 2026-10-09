@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from typing import Any
 
 import httpx
@@ -5,7 +6,9 @@ import pytest
 
 from meridian import AsyncMeridian, Meridian, MeridianError, Ok
 from meridian._errors import error_from_body
+from meridian.admin import AsyncMeridianAdmin, MeridianAdmin
 from tests.support.fake_engine import Scripted, completion
+from tests.support.modes import make_client, resolve
 
 MSG: Any = [{'role': 'user', 'content': 'hi'}]
 
@@ -109,6 +112,132 @@ def test_retryable_true_in_the_envelope_cannot_turn_retries_on() -> None:
 def test_an_envelope_cannot_claim_the_sdk_only_client_error_type() -> None:
     text = '{"error":{"message":"m","type":"client_error","code":"internal","request_id":"r"}}'
     assert error_from_body(500, None, text).type == 'api_error'
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize('depth', [600, 5000])
+async def test_a_deeply_nested_chat_reply_is_a_result_or_a_network_error_never_a_raise(
+    mode: str, engine: Any, depth: int
+) -> None:
+    text = '{"choices": [], "extra": ' + '[' * depth + ']' * depth + '}'
+    engine.next(Scripted(text=text, headers={'content-type': 'application/json'}))
+    result = await resolve(make_client(mode, engine, max_retries=0).chat.create({'messages': MSG}))
+    if depth == 600 or result.error is None:
+        assert result.error is None and result.data['choices'] == []
+    else:
+        assert (result.error.code, result.error.status) == ('network_error', 200)
+
+
+ERROR_MEMBERS = [
+    pytest.param('boom', None, id='string'),
+    pytest.param({}, None, id='empty-object'),
+    pytest.param(False, None, id='false'),
+    pytest.param({'message': 'm', 'code': 'insufficient_credit', 'request_id': 'req_err'}, 'req_err', id='envelope'),
+    pytest.param({'message': 'm', 'code': 'internal', 'request_id': 'a\r\nb'}, None, id='envelope-bad-id'),
+    pytest.param({'message': 'm', 'code': 'internal', 'request_id': 7}, None, id='envelope-number-id'),
+]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(('error', 'own_id'), ERROR_MEMBERS)
+@pytest.mark.parametrize('call', ['chat', 'models'])
+async def test_a_2xx_reply_with_an_error_member_is_a_network_error(
+    mode: str, engine: Any, call: str, error: Any, own_id: str | None
+) -> None:
+    engine.next(Scripted(status=200, headers={'x-request-id': 'req_hdr'}, json={**completion('hey'), 'error': error}))
+    client = make_client(mode, engine)
+    result = await resolve(client.chat.create({'messages': MSG}) if call == 'chat' else client.models.list())
+    assert result.data is None
+    assert (result.error.code, result.error.type, result.error.status) == ('network_error', 'client_error', 200)
+    assert result.error.request_id == (own_id or 'req_hdr')
+    assert 'hey' not in repr(result)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize('call', ['chat', 'models'])
+async def test_a_2xx_reply_with_a_null_error_member_is_a_result(mode: str, engine: Any, call: str) -> None:
+    engine.next(Scripted(json={**completion('hey'), 'error': None}))
+    client = make_client(mode, engine)
+    result = await resolve(client.chat.create({'messages': MSG}) if call == 'chat' else client.models.list())
+    assert result.error is None
+
+
+@pytest.mark.anyio
+async def test_a_chat_reply_over_64_mib_is_refused_without_reading_it_all(mode: str, engine: Any) -> None:
+    piece = b' ' * (1 << 20)
+    engine.next(Scripted(status=200, chunks=[b'{"choices": [], "a": "', *[piece] * 80, b'"}']))
+    result = await resolve(make_client(mode, engine).chat.create({'messages': MSG}))
+    assert (result.error.code, result.error.status) == ('network_error', 200)
+    assert engine.parts_read() <= 66 and engine.upstream_closed()
+
+
+@pytest.mark.anyio
+async def test_an_error_body_over_1_mib_is_a_network_error_with_its_status(
+    mode: str, engine: Any, clock: list[float]
+) -> None:
+    big = {'error': {'message': 'm' * (1 << 20), 'type': 'invalid_request_error', 'code': 'invalid_request'}}
+    engine.next(Scripted(status=400, headers={'x-request-id': 'req_big'}, json=big))
+    result = await resolve(make_client(mode, engine).chat.create({'messages': MSG}))
+    assert (result.error.code, result.error.status, result.error.request_id) == ('network_error', 400, 'req_big')
+    assert len(engine.requests) == 1
+
+
+@pytest.mark.anyio
+async def test_chat_params_holding_nan_or_infinity_are_refused_with_nothing_sent(mode: str, engine: Any) -> None:
+    client = make_client(mode, engine)
+    for number in (float('nan'), float('inf'), float('-inf')):
+        for opened in (client.chat.create, client.chat.stream):
+            result = await resolve(opened({'messages': MSG, 'temperature': number}))
+            assert (result.error.code, result.error.type, result.error.retryable) == (
+                'invalid_request',
+                'client_error',
+                False,
+            )
+    assert engine.requests == []
+
+
+CLIENTS = {
+    'Meridian': (Meridian, 'sync'),
+    'AsyncMeridian': (AsyncMeridian, 'async'),
+    'MeridianAdmin': (MeridianAdmin, 'sync'),
+    'AsyncMeridianAdmin': (AsyncMeridianAdmin, 'async'),
+}
+WRONG_SETTINGS: dict[str, Callable[[str], dict[str, Any]]] = {
+    'url-int': lambda _: {'url': 123},
+    'url-bytes': lambda _: {'url': b'http://engine.test'},
+    'key-int': lambda _: {'key': 123},
+    'key-bytes': lambda _: {'key': b'gmr_x'},
+    'http-client-str': lambda _: {'http_client': 'x', 'transport': None},
+    'transport-str': lambda _: {'transport': 'x'},
+    'http-client-other-mode': lambda kind: {
+        'http_client': httpx.AsyncClient() if kind == 'sync' else httpx.Client(),
+        'transport': None,
+    },
+    'transport-other-mode': lambda kind: {
+        'transport': httpx.AsyncHTTPTransport() if kind == 'sync' else httpx.HTTPTransport()
+    },
+}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize('setting', WRONG_SETTINGS)
+@pytest.mark.parametrize('name', CLIENTS)
+async def test_a_wrong_typed_setting_gives_a_refusing_client_never_a_raise(
+    engine: Any, name: str, setting: str
+) -> None:
+    cls, kind = CLIENTS[name]
+    admin = 'Admin' in name
+    options: dict[str, Any] = {
+        'url': engine.admin_url if admin else engine.public_url,
+        'key': engine.integrator_key if admin else engine.project_key,
+        'transport': engine.transport,
+        **WRONG_SETTINGS[setting](kind),
+    }
+    client: Any = cls(**options)
+    result = await resolve(client.orgs.list() if admin else client.models.list())
+    assert (result.error.code, result.error.type, result.error.retryable) == ('invalid_request', 'client_error', False)
+    assert engine.requests == []
+    await resolve(client.close() if kind == 'sync' else client.aclose())
 
 
 def test_http_client_together_with_transport_is_refused(engine: Any) -> None:

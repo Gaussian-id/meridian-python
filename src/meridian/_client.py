@@ -5,7 +5,7 @@ import os
 import httpx
 
 from ._chat import AsyncChatApi, AsyncModelsApi, ChatApi, ModelsApi
-from ._config import url_refusal
+from ._config import ASYNC_IO, SYNC_IO, io_refusal, url_refusal
 from ._errors import MeridianError, config_error
 from ._transport import AsyncRefusedTransport, AsyncTransport, RefusedTransport, SyncTransport
 
@@ -17,15 +17,15 @@ def resolve_settings(url: str | None, key: str | None) -> tuple[str, str]:
     )
 
 
-def refusal(url: str, key: str, http_client: object, transport: object) -> MeridianError | None:
+def refusal(
+    url: object, key: object, http_client: object, transport: object, kinds: tuple[type, type]
+) -> MeridianError | None:
     """The configuration error both clients answer every call with, or None when the settings are usable."""
     if refused := url_refusal(url, 'The Meridian URL'):
         return refused
-    if not key:
+    if not isinstance(key, str) or not key:
         return config_error('A Meridian project key is required: pass key= or set MERIDIAN_KEY.')
-    if http_client is not None and transport is not None:
-        return config_error('Pass http_client or transport, not both: transport would be ignored.')
-    return None
+    return io_refusal(http_client, transport, kinds)
 
 
 class Meridian:
@@ -43,7 +43,7 @@ class Meridian:
     ) -> None:
         """`http_client` and `transport` are mutually exclusive; passing both is a configuration error."""
         url, key = resolve_settings(url, key)
-        refused = refusal(url, key, http_client, transport)
+        refused = refusal(url, key, http_client, transport, SYNC_IO)
         self._transport: RefusedTransport | SyncTransport = (
             RefusedTransport(refused)
             if refused
@@ -79,7 +79,7 @@ class AsyncMeridian:
     ) -> None:
         """`http_client` and `transport` are mutually exclusive; passing both is a configuration error."""
         url, key = resolve_settings(url, key)
-        refused = refusal(url, key, http_client, transport)
+        refused = refusal(url, key, http_client, transport, ASYNC_IO)
         self._transport: AsyncRefusedTransport | AsyncTransport = (
             AsyncRefusedTransport(refused)
             if refused

@@ -1,14 +1,16 @@
 import copy
 import json
 import re
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
 from meridian._prices import without_prices
 
 # D-27: nothing priced, and none of the rates the operator earns on, may reach an integrator
-PRICED = re.compile('cost|price|per_million|recovery_rate|write_off_rate', re.IGNORECASE)
+PRICED = re.compile(
+    'cost|price|per_million|recovery_rate|write_off_rate|bleed|revenue|uncollected|written_off', re.IGNORECASE
+)
 
 
 @pytest.mark.parametrize(
@@ -26,6 +28,10 @@ PRICED = re.compile('cost|price|per_million|recovery_rate|write_off_rate', re.IG
         'output_PER_MILLION_tokens',
         'recovery_rate',
         'Write_Off_Rate',
+        'bleed',
+        'revenue_share',
+        'Uncollected_Total',
+        'written_off',
     ],
 )
 def test_a_priced_key_is_dropped_at_the_top_and_at_depth(key: str) -> None:
@@ -34,13 +40,27 @@ def test_a_priced_key_is_dropped_at_the_top_and_at_depth(key: str) -> None:
 
 
 def test_a_priced_value_under_an_innocent_key_and_a_key_that_only_looks_close_are_kept() -> None:
-    value: Any = {'note': 'the price is high', 'revenue_share': 1, 'rate': 0.5, 'recovery': 'ok'}
+    value: Any = {'note': 'the price is high', 'rate': 0.5, 'recovery': 'ok'}
     assert without_prices(value) == value
 
 
 @pytest.mark.parametrize('value', [None, True, 3, 1.5, 'cost', [], {}, [None, 1, 'price']])
 def test_plain_values_pass_through(value: Any) -> None:
     assert without_prices(value) == value
+
+
+def test_any_depth_is_cleaned_without_recursion() -> None:
+    deep: Any = {'cost': 1, 'id': 'leaf'}
+    for _ in range(100_000):
+        deep = [{'price': 2, 'next': deep}]
+    out: Any = without_prices(deep)
+    levels = 0
+    while isinstance(out, list):
+        levels += 1
+        first: Any = cast('list[Any]', out)[0]
+        assert list(first) == ['next']
+        out = first['next']
+    assert levels == 100_000 and out == {'id': 'leaf'}
 
 
 def test_the_input_is_not_changed() -> None:
@@ -53,14 +73,14 @@ def test_the_input_is_not_changed() -> None:
 def test_a_real_shaped_reply_of_every_kind_comes_out_clean() -> None:
     log_page: Any = {
         'logs': [
-            {'id': 'l', 'model': 'm', 'tokens_in': 1, 'tokens_out': 2, 'cost_charged': 42, 'latency_ms': 9},
+            {'id': 'l', 'model': 'm', 'tokens_in': 1, 'tokens_out': 2, 'cost_charged': None, 'latency_ms': 9},
         ],
         'has_more': False,
         'next_cursor': None,
     }
     usage: Any = {
-        'summary': {'total_requests': 3, 'total_tokens': 9, 'total_cost': 1.5},
-        'model_performance': [{'model': 'm', 'requests': 3, 'tokens': 9, 'provider_cost': 2}],
+        'summary': {'total_requests': 3, 'total_tokens': 9, 'total_cost': None},
+        'model_performance': [{'model': 'm', 'requests': 3, 'tokens': 9, 'cost': None}],
         'time_range': {'start': 'a', 'end': 'b'},
     }
     catalogue: Any = [

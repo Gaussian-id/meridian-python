@@ -4,7 +4,8 @@ import logging
 import pprint
 import re
 import reprlib
-from typing import TYPE_CHECKING, Any
+import traceback
+from typing import TYPE_CHECKING, Any, cast
 
 import httpx
 import pytest
@@ -83,7 +84,9 @@ TEMPLATE = {
     REFERENCE: '{reference}',
     MODEL: '{model}',
 }
-PRICED = re.compile('cost|price|per_million|recovery_rate|write_off_rate', re.IGNORECASE)
+PRICED = re.compile(
+    'cost|price|per_million|recovery_rate|write_off_rate|bleed|revenue|uncollected|written_off', re.IGNORECASE
+)
 SECRET = 'gmr_' + 'a' * 64  # a key shaped like one, built at run time
 
 
@@ -504,15 +507,15 @@ async def test_usage_and_log_replies_shaped_like_the_engines_lose_their_cost(mod
     engine.next(
         Scripted(
             json={
-                'summary': {'total_requests': 3, 'total_tokens': 9, 'total_cost': 1.5},
-                'model_performance': [{'model': 'm', 'requests': 3, 'tokens': 9, 'provider_cost': 2}],
+                'summary': {'total_requests': 3, 'total_tokens': 9, 'total_cost': None},
+                'model_performance': [{'model': 'm', 'requests': 3, 'tokens': 9, 'cost': None}],
                 'time_range': {'start': 'a', 'end': 'b'},
             }
         ),
         Scripted(
             json={
                 'logs': [
-                    {'id': 'l', 'model': 'm', 'tokens_in': 1, 'tokens_out': 2, 'cost_charged': 42, 'latency_ms': 9}
+                    {'id': 'l', 'model': 'm', 'tokens_in': 1, 'tokens_out': 2, 'cost_charged': None, 'latency_ms': 9}
                 ],
                 'has_more': False,
                 'next_cursor': None,
@@ -899,3 +902,160 @@ async def test_the_async_client_is_an_async_context_manager(engine: Any) -> None
     async with AsyncMeridianAdmin(engine.admin_url, engine.integrator_key, transport=engine.transport) as client:
         assert (await client.orgs.list()).error is None
     await client.aclose()
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Review 1: deep replies, wrong-typed arguments, query values, error members, reply caps
+# ---------------------------------------------------------------------------------------------------------------------
+
+
+def depth_of(value: Any) -> int:
+    """How deep lists nest, counted without recursion."""
+    depth = 0
+    while isinstance(value, list) and value:
+        depth += 1
+        value = cast('list[Any]', value)[0]
+    return depth + (1 if isinstance(value, list) else 0)
+
+
+@pytest.mark.parametrize('depth', [600, 5000])
+@pytest.mark.parametrize('dotted', ['orgs.list', 'logs.list'])
+async def test_a_deeply_nested_reply_is_a_result_or_a_network_error_never_a_raise(
+    mode: str, engine: Any, dotted: str, depth: int
+) -> None:
+    text = '{"rows": ' + '[' * depth + ']' * depth + ', "cost": 1}'
+    engine.next(Scripted(text=text, headers={'content-type': 'application/json'}))
+    result = await call(admin(mode, engine, max_retries=0), dotted, *OPS[dotted])
+    if depth == 600 or result.error is None:  # a parser that reads it hands it over whole, without its price
+        assert result.error is None
+        assert list(result.data) == ['rows']
+        assert depth_of(result.data['rows']) == depth
+    else:  # too deep for this interpreter's parser
+        assert (result.error.code, result.error.status) == ('network_error', 200)
+
+
+async def test_a_byok_credential_given_as_text_is_held_as_a_secret_and_sent_unchanged(mode: str) -> None:
+    raw = 'AIza' + 'q' * 35
+    body = {'credential': raw, 'policy': 'prefer'}
+    held: list[str] = []
+    sent: list[bytes] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        # What a frame-locals error reporter (pytest --showlocals, Sentry) would capture from the SDK's transport
+        sent.append(request.read())
+        for frame, _ in traceback.walk_stack(None):
+            if frame.f_globals.get('__name__') == 'meridian._transport':
+                held.append(repr(frame.f_locals))
+        return httpx.Response(200, json={'provider': 'gemini', 'hint': 'qqqq'})
+
+    client = (MeridianAdmin if mode == 'sync' else AsyncMeridianAdmin)(
+        'http://admin.engine.test', 'gmi_' + '1' * 64, transport=httpx.MockTransport(handler)
+    )
+    result = await call(client, 'provider_credentials.put', ORG, PROVIDER, body)
+    assert result.error is None
+    assert json.loads(sent[0]) == {'credential': raw, 'policy': 'prefer'}
+    assert sent[0] == json.dumps({'credential': raw, 'policy': 'prefer'}).encode()
+    assert held and all(raw not in text for text in held)
+    # The caller's own dict is untouched
+    assert body == {'credential': raw, 'policy': 'prefer'} and type(body['credential']) is str
+
+
+WRITE_OPS = {
+    'orgs.create': (),
+    'projects.create': (ORG,),
+    'projects.update': (ORG, PROJECT),
+    'keys.create': (ORG, PROJECT),
+    'provider_credentials.put': (ORG, PROVIDER),
+    'project_models.put': (ORG, PROJECT),
+}
+
+
+@pytest.mark.parametrize('body', [None, 'x', 5, ['a'], b'x', {'a'}, ('a', 1)], ids=repr)
+@pytest.mark.parametrize('dotted', WRITE_OPS)
+async def test_a_body_that_is_not_a_mapping_is_refused_with_nothing_sent(
+    mode: str, engine: Any, dotted: str, body: Any
+) -> None:
+    if dotted == 'keys.create' and body is None:  # no body is an empty one
+        return
+    result = await call(admin(mode, engine), dotted, *WRITE_OPS[dotted], body)
+    assert (result.error.code, result.error.type, result.error.retryable) == ('invalid_request', 'client_error', False)
+    assert engine.requests == []
+
+
+@pytest.mark.parametrize('dotted', WRITE_OPS)
+async def test_a_body_holding_nan_or_infinity_is_refused_with_nothing_sent(mode: str, engine: Any, dotted: str) -> None:
+    client = admin(mode, engine)
+    for number in (float('nan'), float('inf'), float('-inf')):
+        result = await call(client, dotted, *WRITE_OPS[dotted], {'name': 'a', 'n': number})
+        assert (result.error.code, result.error.type) == ('invalid_request', 'client_error')
+    assert engine.requests == []
+
+
+async def test_an_empty_query_value_is_left_out(mode: str, engine: Any) -> None:
+    client = admin(mode, engine)
+    await call(client, 'logs.list', PROJECT, cursor='')
+    await call(client, 'analytics.usage', PROJECT, from_='', to='')
+    assert [dict(r.url.params) for r in engine.requests] == [{'project_id': PROJECT}] * 2
+
+
+@pytest.mark.parametrize('page_size', [True, False, '5', 1.5, object(), [5]], ids=repr)
+async def test_a_page_size_that_is_not_an_int_is_refused_with_nothing_sent(
+    mode: str, engine: Any, page_size: Any
+) -> None:
+    result = await call(admin(mode, engine), 'logs.list', PROJECT, page_size=page_size)
+    assert (result.error.code, result.error.type) == ('invalid_request', 'client_error')
+    assert engine.requests == []
+
+
+@pytest.mark.parametrize('status', [201, 200], ids=['created', 'replayed'])
+async def test_org_create_is_ok_when_created_and_when_replayed(mode: str, engine: Any, status: int) -> None:
+    org = {'id': 'o1', 'name': 'A', 'external_reference': 'ext-1'}
+    engine.next(Scripted(status=status, json=org))
+    result = await call(admin(mode, engine), 'orgs.create', {'name': 'A', 'external_reference': 'ext-1'})
+    assert result.error is None
+    assert result.data == org
+
+
+ERROR_MEMBERS = [
+    pytest.param('boom', id='string'),
+    pytest.param({}, id='empty-object'),
+    pytest.param(0, id='zero'),
+    pytest.param(False, id='false'),
+    pytest.param([], id='empty-list'),
+    pytest.param({'message': 'm', 'type': 'api_error', 'code': 'internal', 'request_id': 'req_err'}, id='envelope'),
+]
+
+
+@pytest.mark.parametrize('error', ERROR_MEMBERS)
+@pytest.mark.parametrize('dotted', list(OPS))
+async def test_a_2xx_reply_with_an_error_member_is_a_network_error_on_every_call(
+    mode: str, engine: Any, dotted: str, error: Any
+) -> None:
+    engine.next(Scripted(status=200, headers={'x-request-id': 'req_hdr'}, json={'ok': True, 'error': error}))
+    result = await call(admin(mode, engine), dotted, *OPS[dotted])
+    assert result.data is None
+    assert (result.error.code, result.error.type, result.error.status) == ('network_error', 'client_error', 200)
+    assert result.error.request_id == ('req_err' if isinstance(error, dict) and error else 'req_hdr')
+    assert len(engine.requests) == 1
+
+
+async def test_a_2xx_reply_with_a_null_error_member_is_a_result(mode: str, engine: Any) -> None:
+    engine.next(Scripted(json={'id': 'o1', 'error': None}))
+    result = await call(admin(mode, engine), 'orgs.get', ORG)
+    assert result.error is None and result.data == {'id': 'o1', 'error': None}
+
+
+async def test_a_reply_over_64_mib_is_refused_without_reading_it_all(mode: str, engine: Any) -> None:
+    piece = b' ' * (1 << 20)
+    engine.next(Scripted(status=200, chunks=[b'{"a": "', *[piece] * 80, b'"}']))
+    result = await call(admin(mode, engine), 'orgs.list')
+    assert (result.error.code, result.error.status) == ('network_error', 200)
+    assert engine.parts_read() <= 66 and engine.upstream_closed()
+
+
+async def test_an_error_body_over_1_mib_is_not_read_as_an_envelope(mode: str, engine: Any) -> None:
+    big = {'error': {'message': 'm' * (1 << 20), 'type': 'invalid_request_error', 'code': 'invalid_request'}}
+    engine.next(Scripted(status=400, headers={'x-request-id': 'req_big'}, json=big))
+    result = await call(admin(mode, engine), 'orgs.list')
+    assert (result.error.code, result.error.status, result.error.request_id) == ('network_error', 400, 'req_big')
+    assert len(engine.requests) == 1

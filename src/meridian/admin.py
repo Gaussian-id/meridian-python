@@ -6,13 +6,16 @@ catalogue is not wrapped (it returns only supplier prices, and no SDK exposes a 
 an organisation (a person does that in the console).
 
 Every call returns a `Result` and never raises for an API, network, decode or configuration problem. A client built
-with a missing or malformed URL or key, or with both `http_client` and `transport`, answers every call with an
-`invalid_request` / `client_error` and sends nothing. A delete answers `Ok(None)`.
+with a missing, malformed or wrong-typed URL or key, with both `http_client` and `transport`, or with either of the
+wrong kind, answers every call with an `invalid_request` / `client_error` and sends nothing. So does a call whose body
+is not a mapping or holds NaN or infinity, or whose `page_size` is not an int. A delete answers `Ok(None)`. A query
+value that is `None` or `''` is left out.
 
 Retries follow one rule, decided in the transport from the call itself: a read or a delete is retried normally; every
 write (POST, PUT, PATCH) is retried only on `rate_limited`, because a repeat could do the work twice. The one
 exception is `orgs.create` with a non-blank `external_reference`, which the engine replays. Admin calls send no
-`Idempotency-Key`.
+`Idempotency-Key`. A delete that succeeded but whose 204 was lost on the way back is retried, and the retry may then
+answer `not_found`: the resource is gone either way.
 
 Path ids are each one encoded segment. An id that is empty, all white space, `.` or `..` (as given, or after one
 percent-decode), or an organisation id of `by-reference` (the engine's lookup route), is refused with
@@ -28,22 +31,31 @@ The issued key and the credentials you store are secrets:
   logging and pytest's assertion output all use. The key itself is the value: `result.data['api_key']` compares,
   concatenates and encodes as the real key, and `json.dumps(result.data)` carries it, because handing the key to
   its owner as data is the point of issuing it. Printing the value on its own (`print(key)`, `f'{key}'`) shows the
-  key; extracting it is the choice to use it. Pytest's text diff of two strings (`assert key == 'x'`) is not covered.
-* `provider_credentials.put` takes whatever body you give it. Wrap the credential as `{'credential': Secret(raw)}`
-  and it hides the same way and is sent in full. The SDK never echoes a request body in an error.
+  key; extracting it is the choice to use it.
+* `provider_credentials.put` holds a text `credential` as a `Secret` in its own copy of your body (your dict is not
+  changed) and sends it in full; the bytes on the wire are the same. Wrap it yourself (`{'credential': Secret(raw)}`)
+  to hide it in your own code too. The SDK never echoes a request body in an error.
+
+What a `Secret` cannot hide: only `repr()` is redacted, so anything that makes a new plain `str` from it, or reads its
+characters, shows the key. That is `str(key)`, an f-string `f'{key}'`, `format(key)` / `'{}'.format(key)`,
+`'%s' % key`, `+` and `''.join(...)`, slicing (`key[:]`), and every string method that returns text (`.strip()`,
+`.upper()`, ...); `%(api_key)s` and `'{api_key}'.format(**data)` formatting of a dict holding it; logging the bare value
+with `%s` (`log.info('%s', key)`, or `log.info(key)`); an exception built from the value (`ValueError(key)`, whose
+`str()` and traceback print it); JSON and structured log formatters (which encode the value, not its `repr`); the
+bytes of `pickle.dumps`; and pytest's line diff of two strings (`assert key == 'x'` prints both texts).
 """
 
 from __future__ import annotations
 
 import os
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
 from urllib.parse import quote, unquote
 
 import httpx
 
-from ._config import url_refusal
+from ._config import ASYNC_IO, SYNC_IO, io_refusal, url_refusal
 from ._errors import Err, MeridianError, Ok, Result, config_error
 from ._prices import without_prices
 from ._transport import AsyncRefusedTransport, AsyncTransport, Call, RefusedTransport, SyncTransport
@@ -68,6 +80,8 @@ _UNSAFE_ID = config_error(
     f'A resource id must be a string that is not blank, "." or "..", and an organisation id is not "{BY_REFERENCE}".'
 )
 _NO_PROJECT = config_error('A project_id is required.')
+_NOT_AN_OBJECT = config_error('A request body must be a mapping (a JSON object).')
+_BAD_PAGE_SIZE = config_error('page_size must be an int.')
 
 
 class Secret(str):
@@ -120,11 +134,24 @@ def _get(path: str | MeridianError, query: dict[str, Any] | None = None) -> _Op:
 
 
 def _write(
-    method: str, path: str | MeridianError, body: Any, *, repeatable: bool = False, hides_key: bool = False
+    method: str, path: str | MeridianError, body: object, *, repeatable: bool = False, hides_key: bool = False
 ) -> _Op:
+    # A body is a mapping (a JSON object), sent as a copy; anything else is refused and nothing is sent
     if isinstance(path, MeridianError):
         return _Op(path)
-    return _Op(Call(method, path, body=body, repeatable=repeatable), hides_key)
+    if not isinstance(body, Mapping):
+        return _Op(_NOT_AN_OBJECT)
+    return _Op(Call(method, path, body=dict(cast('Mapping[str, Any]', body)), repeatable=repeatable), hides_key)
+
+
+def _with_secret(body: object) -> object:
+    """A credential body with a text `credential` held as a `Secret`, in a new dict (the caller's stays as it is); the
+    wire bytes are the same. Any other body as it is."""
+    fields = cast('Mapping[str, Any]', body)
+    credential = fields.get('credential') if isinstance(body, Mapping) else None
+    if isinstance(credential, str) and not isinstance(credential, Secret):
+        return {**fields, 'credential': Secret(credential)}
+    return fields
 
 
 def _delete(path: str | MeridianError) -> _Op:
@@ -145,7 +172,8 @@ class _Group(Generic[R]):
 class _Orgs(_Group[R]):
     def create(self, body: CreateOrganisation) -> R:
         # The engine replays a repeat by external_reference, so only with one is the call retried like a read
-        reference = body.get('external_reference')
+        # (a body that is no mapping is refused by _write)
+        reference = body.get('external_reference') if isinstance(cast('object', body), Mapping) else None
         return self._send(
             _write('POST', '/v1/orgs', body, repeatable=isinstance(reference, str) and bool(reference.strip()))
         )
@@ -195,8 +223,10 @@ class _ProviderCredentials(_Group[R]):
         return self._send(_get(_route('/v1/orgs/{}/provider-credentials', org)))
 
     def put(self, org: str, provider: str, body: SetCredential) -> R:
-        """Store or replace the organisation's key for a provider. Wrap it in `Secret` to keep it out of logs."""
-        return self._send(_write('PUT', _route('/v1/orgs/{}/provider-credentials/{}', org, provider), body))
+        """Store or replace the organisation's key for a provider. The SDK holds a text `credential` as a `Secret`
+        (in its own copy of the body; yours is untouched) and sends it unchanged."""
+        path = _route('/v1/orgs/{}/provider-credentials/{}', org, provider)
+        return self._send(_write('PUT', path, _with_secret(body)))
 
     def delete(self, org: str, provider: str) -> R:
         return self._send(_delete(_route('/v1/orgs/{}/provider-credentials/{}', org, provider)))
@@ -225,6 +255,9 @@ class _Analytics(_Group[R]):
 
 class _Logs(_Group[R]):
     def list(self, project_id: str, *, page_size: int | None = None, cursor: str | None = None) -> R:
+        size = cast('object', page_size)
+        if size is not None and (isinstance(size, bool) or not isinstance(size, int)):
+            return self._send(_Op(_BAD_PAGE_SIZE))
         return self._send(_scoped('/v1/logs', project_id, page_size=page_size, cursor=cursor))
 
 
@@ -235,15 +268,15 @@ def _resolve(url: str | None, key: str | None) -> tuple[str, str]:
     )
 
 
-def _refusal(url: str, key: str, http_client: object, transport: object) -> MeridianError | None:
+def _refusal(
+    url: object, key: object, http_client: object, transport: object, kinds: tuple[type, type]
+) -> MeridianError | None:
     """The configuration error every call answers with, or None when the settings are usable."""
     if refused := url_refusal(url, 'The Meridian admin URL'):
         return refused
-    if not key:
+    if not isinstance(key, str) or not key:
         return config_error('A Meridian integrator key is required: pass key= or set MERIDIAN_INTEGRATOR_KEY.')
-    if http_client is not None and transport is not None:
-        return config_error('Pass http_client or transport, not both: transport would be ignored.')
-    return None
+    return io_refusal(http_client, transport, kinds)
 
 
 def _hide_key(data: Any) -> Any:
@@ -280,7 +313,7 @@ class MeridianAdmin:
     ) -> None:
         """`url` and `key` default to `MERIDIAN_ADMIN_URL` and `MERIDIAN_INTEGRATOR_KEY`."""
         url, key = _resolve(url, key)
-        refused = _refusal(url, key, http_client, transport)
+        refused = _refusal(url, key, http_client, transport, SYNC_IO)
         self._transport: RefusedTransport | SyncTransport = (
             RefusedTransport(refused)
             if refused
@@ -327,7 +360,7 @@ class AsyncMeridianAdmin:
     ) -> None:
         """`url` and `key` default to `MERIDIAN_ADMIN_URL` and `MERIDIAN_INTEGRATOR_KEY`."""
         url, key = _resolve(url, key)
-        refused = _refusal(url, key, http_client, transport)
+        refused = _refusal(url, key, http_client, transport, ASYNC_IO)
         self._transport: AsyncRefusedTransport | AsyncTransport = (
             AsyncRefusedTransport(refused)
             if refused

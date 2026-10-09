@@ -5,10 +5,10 @@ import random
 import re
 import uuid
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
-from typing import Any
+from typing import Any, cast
 
 import httpx
 
@@ -36,7 +36,12 @@ __all__ = [
 BASE_DELAY = 0.5
 MAX_JITTER = 0.25
 MAX_RETRY_AFTER = 30.0
+# An error body is read this far (an envelope is a few hundred bytes); a buffered reply this far. A body over its cap
+# is refused, never truncated: the cap plus one byte is read, and no more (meridian-go's limits)
+MAX_ERROR_BODY_BYTES = 1 << 20
+MAX_REPLY_BYTES = 64 << 20
 _SECONDS = re.compile(r'\d+(?:\.\d+)?')
+_REQUEST_ID = re.compile(r'[ -~]{1,255}')  # a request id fit to show: 1-255 printable ASCII characters
 # What building or sending a request may raise that becomes an Err: a body or URL that cannot be encoded (TypeError,
 # ValueError, which includes UnicodeError), params too deep to encode (RecursionError)
 _SEND_ERRORS = (httpx.HTTPError, httpx.InvalidURL, TypeError, ValueError, RecursionError)
@@ -118,19 +123,19 @@ class _Shared:
         self.max_retries = sane_retries(max_retries)
 
     def request(self, client: httpx.Client | httpx.AsyncClient, call: Call) -> httpx.Request:
-        # [1] Query encoded once; undefined values left out
-        params = {k: str(v) for k, v in (call.query or {}).items() if v is not None}
+        # [1] Query encoded once; undefined and empty values left out
+        params = {k: str(v) for k, v in (call.query or {}).items() if v is not None and v != ''}
         headers = {
             'accept': 'application/json, text/event-stream',
             'user-agent': f'meridian-python/{__version__}',
             **call.headers,
         }
 
-        # [2] JSON body and bearer key
+        # [2] JSON body (strict: NaN and infinity are no JSON, so they are a ValueError) and bearer key
         content = None
         if call.body is not _NO_BODY:
             headers['content-type'] = 'application/json'
-            content = json.dumps(call.body).encode()
+            content = json.dumps(call.body, allow_nan=False).encode()
         if self.key:
             headers['authorization'] = f'Bearer {self.key}'
         return client.build_request(
@@ -152,7 +157,9 @@ class _Shared:
         return client_error('network_error', 'The network request failed.')
 
     @staticmethod
-    def error_status(response: httpx.Response, text: str) -> tuple[MeridianError, str | None]:
+    def error_status(response: httpx.Response, raw: bytes | None) -> tuple[MeridianError, str | None]:
+        # A body over its cap (None) is no envelope: a network error with the real status
+        text = '' if raw is None else raw.decode('utf-8', 'replace')
         error = error_from_body(response.status_code, response.headers.get('x-request-id'), text)
         return error, response.headers.get('retry-after')
 
@@ -160,6 +167,17 @@ class _Shared:
     def dropped(response: httpx.Response) -> Err:
         message = 'The connection dropped while reading the response body.'
         return Err(client_error('network_error', message, response.status_code))
+
+    @staticmethod
+    def too_large(response: httpx.Response) -> Err:
+        message = 'The reply was larger than the SDK accepts.'
+        return Err(client_error('network_error', message, response.status_code))
+
+    @staticmethod
+    def take(data: bytearray, piece: bytes, cap: int) -> bool:
+        """Add a piece of a body being read; False once it holds more than `cap` bytes (stop reading)."""
+        data += piece
+        return len(data) <= cap
 
     @staticmethod
     def no_content(call: Call, response: httpx.Response) -> Result[Any]:
@@ -170,16 +188,29 @@ class _Shared:
         return Err(client_error('network_error', message, response.status_code))
 
     @staticmethod
-    def decode(call: Call, response: httpx.Response, text: str) -> Result[Any]:
+    def decode(call: Call, response: httpx.Response, raw: bytes | None) -> Result[Any]:
+        # [1] Over the cap, not JSON, or nested deeper than the parser allows (RecursionError): a transport failure
+        status, header_id = response.status_code, response.headers.get('x-request-id')
+        if raw is None:
+            return _Shared.too_large(response)
         try:
-            data: Any = json.loads(text)
-        except (ValueError, RecursionError):  # RecursionError: nested deeper than the parser allows
-            return Err(client_error('network_error', 'The response was not valid JSON.', response.status_code))
+            data: Any = json.loads(raw.decode('utf-8', 'replace'))
+        except (ValueError, RecursionError):
+            return Err(client_error('network_error', 'The response was not valid JSON.', status))
         if data is None:  # a literal null is nothing: no call takes it for a result
-            return Err(client_error('network_error', 'The response was empty (JSON null).', response.status_code))
+            return Err(client_error('network_error', 'The response was empty (JSON null).', status))
+
+        # [2] A reply that says `error` is no result, whatever else it holds: every result is an object without one.
+        # The error's own request id is kept when it is fit to show, else the response's
+        error: Any = cast('dict[str, Any]', data).get('error') if isinstance(data, dict) else None
+        if error is not None:
+            own: Any = cast('dict[str, Any]', error).get('request_id') if isinstance(error, dict) else None
+            usable = own if isinstance(own, str) and _REQUEST_ID.fullmatch(own) else header_id
+            message = "The engine's reply carried an error instead of a result."
+            return Err(replace(client_error('network_error', message, status), request_id=usable))
         if call.object_body and not isinstance(data, dict):
-            return Err(client_error('network_error', 'The response was not a JSON object.', response.status_code))
-        return Ok[Any](None if call.no_content else data, request_id=response.headers.get('x-request-id'))
+            return Err(client_error('network_error', 'The response was not a JSON object.', status))
+        return Ok[Any](None if call.no_content else data, request_id=header_id)
 
 
 class SyncTransport:
@@ -210,15 +241,24 @@ class SyncTransport:
         if response.is_success:
             return response, None, None
 
-        # [2] An error status: read its body once, then close
+        # [2] An error status: read its body once (up to its cap), then close
         try:
-            text = response.read().decode('utf-8', 'replace')
+            raw = self._read(response, MAX_ERROR_BODY_BYTES)
         except httpx.HTTPError:
-            text = ''
+            raw = b''
         finally:
             response.close()
-        error, retry_after = self._shared.error_status(response, text)
+        error, retry_after = self._shared.error_status(response, raw)
         return None, error, retry_after
+
+    @staticmethod
+    def _read(response: httpx.Response, cap: int) -> bytes | None:
+        """The (decoded) body, or None once it is over `cap` bytes: the rest is never read."""
+        data = bytearray()
+        for piece in response.iter_bytes():
+            if not _Shared.take(data, piece, cap):
+                return None
+        return bytes(data)
 
     def open(self, call: Call) -> Result[httpx.Response]:
         # [1] Attempt, backing off between retryable failures; the same Call (and key) every time
@@ -246,12 +286,12 @@ class SyncTransport:
             if response.status_code == 204:
                 return self._shared.no_content(call, response)
 
-            # [3] A body that drops mid-read, or is not JSON, is a transport failure
+            # [3] A body that drops mid-read, is too large or is not JSON is a transport failure
             try:
-                text = response.read().decode('utf-8', 'replace')
+                raw = self._read(response, MAX_REPLY_BYTES)
             except httpx.HTTPError:
                 return self._shared.dropped(response)
-            return self._shared.decode(call, response, text)
+            return self._shared.decode(call, response, raw)
         finally:
             response.close()
 
@@ -290,15 +330,24 @@ class AsyncTransport:
         if response.is_success:
             return response, None, None
 
-        # [2] An error status: read its body once, then close
+        # [2] An error status: read its body once (up to its cap), then close
         try:
-            text = (await response.aread()).decode('utf-8', 'replace')
+            raw = await self._read(response, MAX_ERROR_BODY_BYTES)
         except httpx.HTTPError:
-            text = ''
+            raw = b''
         finally:
             await response.aclose()
-        error, retry_after = self._shared.error_status(response, text)
+        error, retry_after = self._shared.error_status(response, raw)
         return None, error, retry_after
+
+    @staticmethod
+    async def _read(response: httpx.Response, cap: int) -> bytes | None:
+        """The (decoded) body, or None once it is over `cap` bytes: the rest is never read."""
+        data = bytearray()
+        async for piece in response.aiter_bytes():
+            if not _Shared.take(data, piece, cap):
+                return None
+        return bytes(data)
 
     async def open(self, call: Call) -> Result[httpx.Response]:
         # [1] Attempt, backing off between retryable failures; a CancelledError in the wait propagates
@@ -326,12 +375,12 @@ class AsyncTransport:
             if response.status_code == 204:
                 return self._shared.no_content(call, response)
 
-            # [3] A body that drops mid-read, or is not JSON, is a transport failure
+            # [3] A body that drops mid-read, is too large or is not JSON is a transport failure
             try:
-                text = (await response.aread()).decode('utf-8', 'replace')
+                raw = await self._read(response, MAX_REPLY_BYTES)
             except httpx.HTTPError:
                 return self._shared.dropped(response)
-            return self._shared.decode(call, response, text)
+            return self._shared.decode(call, response, raw)
         finally:
             await response.aclose()
 
