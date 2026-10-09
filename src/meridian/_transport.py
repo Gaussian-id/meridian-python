@@ -5,7 +5,7 @@ import random
 import re
 import uuid
 from collections.abc import Mapping
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Any, cast
@@ -14,7 +14,7 @@ import httpx
 
 from . import _clock
 from ._config import DEFAULT_MAX_RETRIES, DEFAULT_TIMEOUT, sane_retries, sane_timeout
-from ._errors import Err, MeridianError, Ok, Result, client_error, config_error, error_from_body
+from ._errors import Err, MeridianError, Ok, Result, client_error, config_error, error_from_body, valid_request_id
 from ._version import __version__
 
 _NO_BODY: Any = object()
@@ -41,7 +41,9 @@ MAX_RETRY_AFTER = 30.0
 MAX_ERROR_BODY_BYTES = 1 << 20
 MAX_REPLY_BYTES = 64 << 20
 _SECONDS = re.compile(r'\d+(?:\.\d+)?')
-_REQUEST_ID = re.compile(r'[ -~]{1,255}')  # a request id fit to show: 1-255 printable ASCII characters
+_DELTA_SECONDS = re.compile(r'\d+')
+# The engine's rule for an idempotency key (meridian-domain ids.rs): 1-255 characters, each visible ASCII 0x21-0x7E
+_IDEMPOTENCY_KEY = re.compile(r'[!-~]{1,255}')
 # What building or sending a request may raise that becomes an Err: a body or URL that cannot be encoded (TypeError,
 # ValueError, which includes UnicodeError), params too deep to encode (RecursionError)
 _SEND_ERRORS = (httpx.HTTPError, httpx.InvalidURL, TypeError, ValueError, RecursionError)
@@ -53,7 +55,8 @@ class Call:
     path: str
     query: Mapping[str, str | int | None] | None = None
     body: Any = _NO_BODY
-    headers: Mapping[str, str] = field(default_factory=lambda: {})
+    # Sent as the `idempotency-key` header on every attempt: the engine replays a repeat instead of running it twice
+    idempotency_key: str | None = None
     # True: repeating the call is harmless although it is a write with no idempotency key (see `may_repeat`)
     repeatable: bool = False
     object_body: bool = False  # True: a 2xx body that is not a JSON object is a transport failure
@@ -62,6 +65,25 @@ class Call:
 
 def new_idempotency_key() -> str:
     return str(uuid.uuid4())
+
+
+def valid_idempotency_key(value: object) -> bool:
+    """The one rule for an idempotency key, the caller's and a browser's: what the engine accepts."""
+    return isinstance(value, str) and _IDEMPOTENCY_KEY.fullmatch(value) is not None
+
+
+def valid_retry_after(value: str | None) -> str | None:
+    """A `Retry-After` header worth handing on, trimmed: delta-seconds or an HTTP date. Anything else is None."""
+    text = (value or '').strip()
+    if not valid_request_id(text):  # printable ASCII only, so it can never break a header
+        return None
+    if _DELTA_SECONDS.fullmatch(text):
+        return text
+    try:
+        parsedate_to_datetime(text)
+    except (TypeError, ValueError):
+        return None
+    return text
 
 
 def retry_after_seconds(value: str | None) -> float | None:
@@ -89,11 +111,7 @@ def may_repeat(call: Call) -> bool:
     marked `repeatable`. Every other call (a write the engine would run twice) is safe by default: it is repeated only
     after a rate limit, which means the engine did not run it.
     """
-    return (
-        call.repeatable
-        or call.method.upper() in ('GET', 'DELETE')
-        or any(name.lower() == 'idempotency-key' for name in call.headers)
-    )
+    return call.repeatable or call.idempotency_key is not None or call.method.upper() in ('GET', 'DELETE')
 
 
 def next_wait(tried: int, error: MeridianError, retry_after: str | None, call: Call, max_retries: int) -> float | None:
@@ -125,11 +143,9 @@ class _Shared:
     def request(self, client: httpx.Client | httpx.AsyncClient, call: Call) -> httpx.Request:
         # [1] Query encoded once; undefined and empty values left out
         params = {k: str(v) for k, v in (call.query or {}).items() if v is not None and v != ''}
-        headers = {
-            'accept': 'application/json, text/event-stream',
-            'user-agent': f'meridian-python/{__version__}',
-            **call.headers,
-        }
+        headers = {'accept': 'application/json, text/event-stream', 'user-agent': f'meridian-python/{__version__}'}
+        if call.idempotency_key is not None:
+            headers['idempotency-key'] = call.idempotency_key
 
         # [2] JSON body (strict: NaN and infinity are no JSON, so they are a ValueError) and bearer key
         content = None
@@ -161,7 +177,8 @@ class _Shared:
         # A body over its cap (None) is no envelope: a network error with the real status
         text = '' if raw is None else raw.decode('utf-8', 'replace')
         error = error_from_body(response.status_code, response.headers.get('x-request-id'), text)
-        return error, response.headers.get('retry-after')
+        retry_after = response.headers.get('retry-after')
+        return replace(error, retry_after=valid_retry_after(retry_after)), retry_after
 
     @staticmethod
     def dropped(response: httpx.Response) -> Err:
@@ -205,7 +222,7 @@ class _Shared:
         error: Any = cast('dict[str, Any]', data).get('error') if isinstance(data, dict) else None
         if error is not None:
             own: Any = cast('dict[str, Any]', error).get('request_id') if isinstance(error, dict) else None
-            usable = own if isinstance(own, str) and _REQUEST_ID.fullmatch(own) else header_id
+            usable = valid_request_id(own) or header_id
             message = "The engine's reply carried an error instead of a result."
             return Err(replace(client_error('network_error', message, status), request_id=usable))
         if call.object_body and not isinstance(data, dict):
@@ -227,10 +244,6 @@ class SyncTransport:
         self._shared = _Shared(base_url, key, timeout, max_retries)
         self._owns = http_client is None
         self._client = http_client or httpx.Client(transport=transport)
-
-    @property
-    def max_retries(self) -> int:
-        return self._shared.max_retries
 
     def _attempt(self, call: Call) -> tuple[httpx.Response | None, MeridianError | None, str | None]:
         # [1] Send, keeping the body unread
@@ -317,10 +330,6 @@ class AsyncTransport:
         self._owns = http_client is None
         self._client = http_client or httpx.AsyncClient(transport=transport)
 
-    @property
-    def max_retries(self) -> int:
-        return self._shared.max_retries
-
     async def _attempt(self, call: Call) -> tuple[httpx.Response | None, MeridianError | None, str | None]:
         # [1] Send, keeping the body unread
         try:
@@ -392,8 +401,6 @@ class AsyncTransport:
 class RefusedTransport:
     """Every call answers the same configuration error; nothing is sent."""
 
-    max_retries = 0
-
     def __init__(self, error: MeridianError) -> None:
         self._error = error
 
@@ -409,8 +416,6 @@ class RefusedTransport:
 
 class AsyncRefusedTransport:
     """The async twin of RefusedTransport."""
-
-    max_retries = 0
 
     def __init__(self, error: MeridianError) -> None:
         self._error = error

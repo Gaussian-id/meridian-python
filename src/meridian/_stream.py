@@ -58,10 +58,10 @@ class _State:
         try:
             raw: Any = json.loads(data)
         except (ValueError, RecursionError):
-            self.error = client_error('network_error', 'The stream sent a frame that is not valid JSON.')
+            self.error = self.failure('network_error', 'The stream sent a frame that is not valid JSON.')
             return 'done'
         if not isinstance(raw, dict) or not isinstance(raw.get('choices'), list):  # pyright: ignore[reportUnknownMemberType]
-            self.error = client_error('network_error', 'The stream sent a frame that is not a chat chunk.')
+            self.error = self.failure('network_error', 'The stream sent a frame that is not a chat chunk.')
             return 'done'
         chunk: dict[str, Any] = raw  # pyright: ignore[reportUnknownVariableType]
 
@@ -76,20 +76,27 @@ class _State:
         content: Any = cast('dict[str, Any]', delta).get('content') if isinstance(delta, dict) else None
         return ChatChunk(content if isinstance(content, str) else '', chunk)
 
+    def failure(self, code: str, message: str) -> MeridianError:
+        """A failure on the SDK's side of this stream, carrying the response's request id."""
+        return client_error(code, message, request_id=self.request_id)
+
     def abort(self, message: str) -> None:
         """Record `aborted`, unless the stream already ended with a verdict of its own."""
         if self.error is None:
-            self.error = client_error('aborted', message)
+            self.error = self.failure('aborted', message)
 
     def too_large(self) -> None:
-        self.error = client_error('network_error', 'The stream sent an event larger than 16 MiB.')
+        self.error = self.failure('network_error', 'The stream sent an event larger than 16 MiB.')
+
+    def ended_early(self) -> None:
+        self.error = self.failure('network_error', 'The stream ended before it finished.')
 
     def failed(self) -> None:
         """The connection broke while reading: aborted if the caller cancelled, otherwise a network error."""
         if self.cancelled:
             self.abort('The stream was aborted.')
         else:
-            self.error = client_error('network_error', 'The stream connection failed.')
+            self.error = self.failure('network_error', 'The stream connection failed.')
 
     def begin(self) -> bool:
         """True when this read may proceed; a second read of an unfinished stream is recorded as aborted."""
@@ -173,7 +180,7 @@ class ChatStream:
 
             # [3] A body that ended without [DONE] lost its connection
             ended = True
-            state.error = client_error('network_error', 'The stream ended before it finished.')
+            state.ended_early()
         except EventTooLarge:
             ended = True
             state.too_large()
@@ -268,7 +275,7 @@ class AsyncChatStream:
 
             # [3] A body that ended without [DONE] lost its connection
             ended = True
-            state.error = client_error('network_error', 'The stream ended before it finished.')
+            state.ended_early()
         except EventTooLarge:
             ended = True
             state.too_large()

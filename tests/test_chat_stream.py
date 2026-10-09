@@ -163,6 +163,24 @@ async def test_a_malformed_frame_is_a_network_error(mode: str, engine: Any) -> N
     assert engine.upstream_closed()
 
 
+@pytest.mark.parametrize(
+    ('parts', 'scripted'),
+    [
+        pytest.param([frame(chunk('a')), frame(chunk('b'))], {'drop_after': 1}, id='dropped'),
+        pytest.param([frame(chunk('a'))], {}, id='ended-without-done'),
+        pytest.param([frame('{not json')], {}, id='not-json'),
+        pytest.param([frame([1, 2])], {}, id='not-a-chunk'),
+        pytest.param([b'data: ' + b'x' * (17 * 1024 * 1024)], {}, id='too-large'),
+    ],
+)
+async def test_a_failure_on_the_sdks_side_of_a_stream_keeps_the_responses_request_id(
+    mode: str, engine: Any, parts: list[Any], scripted: dict[str, Any]
+) -> None:
+    s = await open_stream(mode, engine, *parts, headers={'x-request-id': 'req_stream'}, **scripted)
+    await collect(s)
+    assert (s.error.code, s.error.request_id) == ('network_error', 'req_stream')
+
+
 async def test_a_frame_nested_too_deep_to_parse_is_a_network_error(mode: str, engine: Any) -> None:
     s = await open_stream(mode, engine, frame('[' * 100_000), frame('[DONE]'))
     assert await collect(s) == []

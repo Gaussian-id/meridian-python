@@ -27,19 +27,17 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Generic, Literal, Protocol, TypeVar, cast, runtime_checkable
 
 from ._client import AsyncMeridian, Meridian, async_shared_client, shared_client
-from ._errors import STATUS_BY_CODE, MeridianError, Result, config_error
+from ._errors import STATUS_BY_CODE, MeridianError, Result, config_error, valid_request_id
 from ._stream import AsyncChatStream, ChatStream
+from ._transport import valid_idempotency_key
 
 if TYPE_CHECKING:
     from .types import ChatParams
 
+# What an adapter or an app needs. The constants (APP_CREDENTIAL_CODES, GENERIC_MESSAGE, MAX_BODY_BYTES,
+# MAX_BODY_DEPTH, MAX_EVENT_BYTES) stay importable for anyone who wants to read them
 __all__ = [
-    'APP_CREDENTIAL_CODES',
     'DEFAULT_MAX_TOKENS_CAP',
-    'GENERIC_MESSAGE',
-    'MAX_BODY_BYTES',
-    'MAX_BODY_DEPTH',
-    'MAX_EVENT_BYTES',
     'AllowRule',
     'AsyncForwarder',
     'AsyncReplyBody',
@@ -79,12 +77,12 @@ APP_CREDENTIAL_CODES = frozenset(
     }
 )
 
-# Fields the route sets itself: `options` can never copy them raw (max_completion_tokens would lift the token cap)
+# Fields the route sets itself or never takes: `options` can never copy them raw (max_completion_tokens would lift the
+# token cap, and `n` would multiply what one request spends)
 _OWNED_FIELDS = frozenset(
-    {'model', 'stream', 'stream_options', 'messages', 'max_tokens', 'max_completion_tokens', 'temperature'}
+    {'model', 'stream', 'stream_options', 'messages', 'max_tokens', 'max_completion_tokens', 'temperature', 'n'}
 )
 _JSON_TYPE = re.compile(r'application/json\s*(?:;|$)', re.IGNORECASE)
-_PRINTABLE = re.compile(r'[ -~]{1,255}')  # a browser's idempotency key, or an engine's request id
 _SSE_HEADERS = {'content-type': 'text/event-stream; charset=utf-8', 'cache-control': 'no-cache'}
 
 
@@ -164,7 +162,13 @@ def _dumps(value: Any) -> bytes:
 def _safe_id(value: object) -> str | None:
     """An id from the engine, fit for a header and for the body: 1-255 printable ASCII characters, so never a line
     break (header injection). Anything else is None, and the id is left out."""
-    return value if isinstance(value, str) and _PRINTABLE.fullmatch(value) else None
+    return valid_request_id(value)
+
+
+def _hides(code: str, *, sdk_side: bool = False) -> bool:
+    """The one decision about what a browser may not learn: a failure on the SDK's side, a code this SDK does not
+    recognise (a newer engine's code could be about the app's account), or the app's own key, account or credit."""
+    return sdk_side or code not in STATUS_BY_CODE or code in APP_CREDENTIAL_CODES
 
 
 def _json_reply(
@@ -193,16 +197,17 @@ def _generic_frame(request_id: str | None) -> bytes:
 
 
 def _browser_error(error: MeridianError) -> Reply[Any]:
-    # [1] The app's own key, account or credit, any failure on the SDK's side, and any engine code this SDK does not
-    # recognise (a newer engine's code could be about the app's account): the generic 503, request id kept
-    if error.code in APP_CREDENTIAL_CODES or error.type == 'client_error' or error.engine_code is not None:
+    # [1] What the browser may not learn (see _hides): the generic 503, request id kept, never a Retry-After
+    if _hides(error.engine_code or error.code, sdk_side=error.type == 'client_error'):
         return _json_reply(503, _generic(error.request_id), error.request_id)
 
-    # [2] Anything about the end user's own request keeps its real status and code
+    # [2] Anything about the end user's own request keeps its real status and code; a rate limit keeps the engine's
+    # valid Retry-After, so the browser waits as long as the engine asked
     body: dict[str, Any] = {'message': error.message, 'type': error.type, 'code': error.code}
     if request_id := _safe_id(error.request_id):
         body['request_id'] = request_id
-    return _json_reply(error.status if error.status > 0 else 502, {'error': body}, error.request_id)
+    wait = {'retry-after': error.retry_after} if error.code == 'rate_limited' and error.retry_after else None
+    return _json_reply(error.status if error.status > 0 else 502, {'error': body}, error.request_id, wait)
 
 
 def _refuse(status: int, code: str, message: str, extra: dict[str, str] | None = None) -> Reply[Any]:
@@ -245,10 +250,9 @@ def _verdict(value: object, response_type: type | tuple[type, ...]) -> Reply[Any
 
 
 def _browser_key(value: str | None) -> str | None:
-    """The browser's idempotency key: 1-255 printable ASCII characters once trimmed of spaces (a header value cannot
-    start or end with one). Anything else is None, and the SDK makes a key of its own."""
-    key = (value or '').strip(' ')
-    return key if _PRINTABLE.fullmatch(key) else None
+    """The browser's idempotency key when the engine would accept it (the client's own rule); anything else is None,
+    and the client makes a key of its own."""
+    return value if valid_idempotency_key(value) else None
 
 
 def _client_for(option: object, kind: type[C]) -> C | None:
@@ -480,9 +484,7 @@ def _error_verdict(value: Any) -> tuple[_Verdict, str | None]:
         return 'terminal', carried
 
     # [3] A code this SDK knows that is not about the app's own key, account or credit passes as it is
-    if code in STATUS_BY_CODE and code not in APP_CREDENTIAL_CODES:
-        return 'pass', None
-    return 'hide', carried
+    return ('hide', carried) if _hides(code) else ('pass', None)
 
 
 def _judge(event: bytes, first: bool) -> tuple[_Judgement, str | None]:
@@ -721,7 +723,7 @@ def _buffered(result: Result[Any]) -> Reply[Any]:
     if isinstance(data, dict) and cast('dict[str, Any]', data).get('error') is not None:
         request_id = _carried_id(cast('dict[str, Any]', data)['error']) or result.request_id
         return _json_reply(503, _generic(request_id), request_id)
-    return _json_reply(200, data)
+    return _json_reply(200, data, result.request_id)
 
 
 # --- The two helpers ------------------------------------------------------------------------------------------------

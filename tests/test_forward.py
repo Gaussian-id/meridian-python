@@ -2,6 +2,7 @@ import asyncio
 import gzip
 import inspect
 import json
+import re
 import threading
 from collections.abc import AsyncIterator, Callable, Coroutine, Iterator
 from typing import Any, cast
@@ -490,6 +491,13 @@ async def test_options_can_never_lift_the_cap_through_max_completion_tokens(mode
     assert 'max_completion_tokens' not in sent and sent['max_tokens'] == 4096
 
 
+async def test_options_can_never_copy_n(mode: str, engine: Any) -> None:
+    # Many choices per request would multiply what one browser request spends
+    await send(build(mode, engine, allow=AllowRule(options=('n', 'seed'))), {'messages': MSG, 'n': 50, 'seed': 1})
+    sent = engine.bodies()[0]
+    assert 'n' not in sent and sent['seed'] == 1
+
+
 async def test_options_are_copied_only_when_present(mode: str, engine: Any) -> None:
     allow = AllowRule(options=('top_p', 'seed'))
     await send(build(mode, engine, allow=allow), {'messages': MSG, 'top_p': None})
@@ -546,24 +554,29 @@ async def test_a_model_only_when_allowed(mode: str, engine: Any) -> None:
     ('key', 'forwarded'),
     [
         ('k-123', True),
+        ('a-b_c.1', True),
         ('x' * 255, True),
+        ('!~', True),
         ('', False),
-        ('x' * 300, False),
+        ('x' * 256, False),
         ('ü', False),
         ('   ', False),
         ('k\n', False),
+        ('k\r\nx', False),
         ('k\tx', False),
+        ('k\x7f', False),
+        ('order 42', False),
+        (' k-1', False),
+        ('k-1 ', False),
     ],
 )
 async def test_the_browser_idempotency_key(mode: str, engine: Any, key: str, forwarded: bool) -> None:
+    # The engine's own rule (and the client's): 1-255 characters, each visible ASCII (0x21-0x7E). Anything else is
+    # replaced by a key the client makes, never trimmed or refused
     await send(build(mode, engine), {'messages': MSG}, key=key)
     sent = engine.requests[0].headers['idempotency-key']
     assert (sent == key) is forwarded and 1 <= len(sent) <= 255
-
-
-async def test_spaces_around_the_browser_key_are_trimmed_so_it_can_be_sent(mode: str, engine: Any) -> None:
-    await send(build(mode, engine), {'messages': MSG}, key=' k-1 ')
-    assert engine.requests[0].headers['idempotency-key'] == 'k-1'
+    assert all(0x21 <= ord(c) <= 0x7E for c in sent)
 
 
 # --- The client -----------------------------------------------------------------------------------------------------
@@ -642,6 +655,56 @@ async def test_a_buffered_reply_is_json(mode: str, engine: Any) -> None:
     reply = await send(build(mode, engine), {'messages': MSG})
     assert reply.status == 200 and reply.headers['content-type'] == 'application/json'
     assert payload(reply)['choices'][0]['message']['content'] == 'hey'
+
+
+async def test_a_buffered_reply_relays_a_valid_request_id_only(mode: str, engine: Any) -> None:
+    engine.next(
+        Scripted(headers={'x-request-id': 'req_ok'}, json=completion('hey')),
+        Scripted(headers={'x-request-id': wire_id('a\r\nset-cookie: x=1')}, json=completion('hey')),
+    )
+    fwd = build(mode, engine)
+    good, bad = await send(fwd, {'messages': MSG}), await send(fwd, {'messages': MSG})
+    assert good.headers == {'content-type': 'application/json', 'x-request-id': 'req_ok'}
+    assert bad.headers == {'content-type': 'application/json'} and bad.status == 200
+
+
+@pytest.mark.parametrize(
+    ('value', 'relayed'),
+    [
+        ('7', True),
+        ('0', True),
+        ('Wed, 21 Oct 2037 07:28:00 GMT', True),
+        ('  7  ', True),
+        ('1e3', False),
+        ('7.5', False),
+        ('-1', False),
+        ('soon', False),
+        ('7\r\nset-cookie: x=1', False),
+    ],
+)
+async def test_a_passed_through_rate_limit_relays_a_valid_retry_after(
+    mode: str, engine: Any, value: str, relayed: bool
+) -> None:
+    engine.next(Scripted(status=429, headers={'retry-after': wire_id(value)}, json=envelope('rate_limited', 'req_rl')))
+    reply = await send(build(mode, engine), {'messages': MSG})
+    assert reply.status == 429 and payload(reply)['error']['code'] == 'rate_limited'
+    assert reply.headers.get('retry-after') == (value.strip() if relayed else None)
+
+
+@pytest.mark.parametrize(
+    ('code', 'status'),
+    [('insufficient_credit', 402), ('hard_limit_reached', 429), ('service_unavailable', 503), ('internal', 500)],
+)
+async def test_retry_after_is_relayed_for_no_other_code(mode: str, engine: Any, code: str, status: int) -> None:
+    engine.next(Scripted(status=status, headers={'retry-after': '7'}, json=envelope(code, 'req_x')))
+    reply = await send(build(mode, engine), {'messages': MSG})
+    assert 'retry-after' not in reply.headers
+
+
+async def test_a_rate_limit_before_a_stream_starts_relays_retry_after_too(mode: str, engine: Any) -> None:
+    engine.next(Scripted(status=429, headers={'retry-after': '9'}, json=envelope('rate_limited', 'req_rl')))
+    reply = await send(build(mode, engine), {'messages': MSG, 'stream': True})
+    assert reply.status == 429 and reply.headers['retry-after'] == '9'
 
 
 def test_the_ten_codes_of_the_spec() -> None:
@@ -1554,13 +1617,9 @@ async def test_a_read_body_that_gives_a_bytearray_is_accepted(mode: str, engine:
 def test_the_module_lists_its_public_names() -> None:
     import meridian.forward as forward
 
+    # Only what an adapter or an app needs is listed; the constants stay importable for those who look
     expected = {
-        'APP_CREDENTIAL_CODES',
         'DEFAULT_MAX_TOKENS_CAP',
-        'GENERIC_MESSAGE',
-        'MAX_BODY_BYTES',
-        'MAX_BODY_DEPTH',
-        'MAX_EVENT_BYTES',
         'AllowRule',
         'AsyncForwarder',
         'AsyncReplyBody',
@@ -1569,6 +1628,16 @@ def test_the_module_lists_its_public_names() -> None:
         'ReplyBody',
     }
     assert set(forward.__all__) == expected and all(hasattr(forward, name) for name in forward.__all__)
+    for name in ('APP_CREDENTIAL_CODES', 'GENERIC_MESSAGE', 'MAX_BODY_BYTES', 'MAX_BODY_DEPTH', 'MAX_EVENT_BYTES'):
+        assert hasattr(forward, name)
+
+
+def test_the_engine_versions_are_exported() -> None:
+    import meridian
+
+    assert re.fullmatch(r'[0-9a-f]{12}', meridian.ENGINE_SPEC_COMMIT)
+    assert meridian.ENGINE_API_VERSION and isinstance(meridian.ENGINE_API_VERSION, str)
+    assert {'ENGINE_API_VERSION', 'ENGINE_SPEC_COMMIT'} <= set(meridian.__all__)
 
 
 # --- Stream content the guard cannot judge fails closed ---------------------------------------------------------------

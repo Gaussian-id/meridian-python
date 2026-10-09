@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from typing import Any, Final, Generic, TypeVar, Union, cast
@@ -89,13 +90,21 @@ class MeridianError:
     # The engine's own code when this SDK does not recognise it (`code` is then `internal`); None for every other
     # error. Not part of the error's identity: it appears in neither `repr` nor `==`.
     engine_code: str | None = field(default=None, repr=False, compare=False)
+    # The response's `Retry-After` header when it was valid (delta-seconds or an HTTP date), as sent; None otherwise.
+    # Not part of the error's identity either.
+    retry_after: str | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass(frozen=True)
 class Ok(Generic[T]):
+    """A successful call: `data` is the result and `error` is None.
+
+    `request_id` is the engine's `x-request-id` for the call, when the response had one (give it to Gaussian support
+    with any question about the call). It is not part of the result's identity: it is in neither `repr` nor `==`.
+    """
+
     data: T
     error: None = None
-    # The response's own x-request-id, when it had one: not part of the result's identity (not in `repr` or `==`)
     request_id: str | None = field(default=None, repr=False, compare=False)
 
 
@@ -108,9 +117,18 @@ class Err:
 Result = Union[Ok[T], Err]  # noqa: UP007  (a runtime alias: `X | Y` on a generic is 3.10-fragile with TypeVars)
 
 
-def client_error(code: str, message: str, status: int = 0) -> MeridianError:
+_REQUEST_ID = re.compile(r'[ -~]{1,255}')
+
+
+def valid_request_id(value: object) -> str | None:
+    """A request id fit for a header and a body: 1-255 printable ASCII characters (spaces allowed, never a line
+    break). Anything else is None."""
+    return value if isinstance(value, str) and _REQUEST_ID.fullmatch(value) else None
+
+
+def client_error(code: str, message: str, status: int = 0, request_id: str | None = None) -> MeridianError:
     """`network_error` or `aborted`: a failure on the SDK's side of the wire."""
-    return MeridianError(code, 'client_error', status, message, code == 'network_error')
+    return MeridianError(code, 'client_error', status, message, code == 'network_error', request_id)
 
 
 def config_error(message: str) -> MeridianError:

@@ -7,7 +7,6 @@ from tests.support.fake_engine import Scripted, completion, engine_error
 from tests.support.modes import make_client, resolve
 
 MSG: Any = [{'role': 'user', 'content': 'hi'}]
-NO_HEADERS: dict[str, str] = {}
 pytestmark = [pytest.mark.anyio, pytest.mark.fake_only]
 
 
@@ -117,37 +116,56 @@ def test_a_call_that_is_not_safe_to_repeat_retries_only_rate_limited() -> None:
     assert next_wait(0, err('rate_limited', 429), '1', unsafe, 2) == 1.0
 
 
-@pytest.mark.parametrize(
-    ('call', 'repeats'),
-    [
-        pytest.param(('GET', NO_HEADERS, False), True, id='get'),
-        pytest.param(('DELETE', NO_HEADERS, False), True, id='delete'),
-        pytest.param(('POST', NO_HEADERS, False), False, id='post'),
-        pytest.param(('PUT', NO_HEADERS, False), False, id='put'),
-        pytest.param(('PATCH', NO_HEADERS, False), False, id='patch'),
-        pytest.param(('post', NO_HEADERS, False), False, id='lowercase-post'),
-        pytest.param(('CUSTOM', NO_HEADERS, False), False, id='unknown-method'),
-        pytest.param(('POST', NO_HEADERS, True), True, id='post-marked-repeatable'),
-        pytest.param(('PATCH', NO_HEADERS, True), True, id='patch-marked-repeatable'),
-        pytest.param(('POST', {'idempotency-key': 'k'}, False), True, id='post-with-idempotency-key'),
-        pytest.param(('POST', {'Idempotency-Key': 'k'}, False), True, id='post-with-idempotency-key-any-case'),
-    ],
-)
-def test_whether_a_failure_is_retried_is_derived_from_the_call(
-    call: tuple[str, dict[str, str], bool], repeats: bool
-) -> None:
-    from meridian._errors import error_from_body
-    from meridian._transport import Call, next_wait
+# Which calls repeat after a failure that may have reached the engine is pinned through the public clients: a chat
+# call (it carries an idempotency key) here, GET / DELETE / every admin write / orgs.create in test_admin.py.
 
-    method, headers, repeatable = call
-    sent = Call(method, '/x', headers=headers, repeatable=repeatable)
-    for code, status in (('upstream_unavailable', 502), ('service_unavailable', 503), ('deadline_exceeded', 504)):
-        body = json.dumps({'error': {'message': 'm', 'type': 'api_error', 'code': code, 'request_id': 'r'}})
-        assert (next_wait(0, error_from_body(status, 'r', body), None, sent, 2) is not None) is repeats
-    limited = error_from_body(
-        429, 'r', json.dumps({'error': {'message': 'm', 'type': 'rate_limit_error', 'code': 'rate_limited'}})
-    )
-    assert next_wait(0, limited, '1', sent, 2) == 1.0
+
+@pytest.mark.parametrize('key', [None, '', 'caller-key-1'])
+async def test_a_chat_call_repeats_after_a_failure_that_may_have_reached_the_engine(
+    mode: str, engine: Any, clock: list[float], key: str | None
+) -> None:
+    engine.next(engine_error('upstream_unavailable'), Scripted(network_error=True), Scripted(json=completion()))
+    result = await resolve(make_client(mode, engine).chat.create({'messages': MSG}, idempotency_key=key))
+    assert result.error is None and len(engine.requests) == 3
+    assert len({r.headers['idempotency-key'] for r in engine.requests}) == 1
+
+
+BAD_KEYS = [
+    pytest.param('order 42', id='inner-space'),
+    pytest.param(' k', id='leading-space'),
+    pytest.param('k ', id='trailing-space'),
+    pytest.param('\tk', id='tab'),
+    pytest.param('k\x7f', id='delete-char'),
+    pytest.param('kü', id='non-ascii'),
+    pytest.param('k\r\nx-evil: 1', id='crlf'),
+    pytest.param('k\n', id='lf'),
+    pytest.param('x' * 256, id='256-chars'),
+    pytest.param('   ', id='only-spaces'),
+]
+
+
+@pytest.mark.parametrize('key', BAD_KEYS)
+@pytest.mark.parametrize('call', ['create', 'stream'])
+async def test_an_idempotency_key_the_engine_would_refuse_is_a_config_error_with_nothing_sent(
+    mode: str, engine: Any, call: str, key: str
+) -> None:
+    client = make_client(mode, engine)
+    result = await resolve(getattr(client.chat, call)({'messages': MSG}, idempotency_key=key))
+    assert (result.error.code, result.error.type, result.error.retryable) == ('invalid_request', 'client_error', False)
+    assert engine.requests == []
+
+
+@pytest.mark.parametrize('key', ['a-b_c.1', 'x' * 255, '!', '~{}[]"\'', 'k-123'])
+async def test_a_valid_idempotency_key_is_sent_as_given(mode: str, engine: Any, key: str) -> None:
+    await resolve(make_client(mode, engine).chat.create({'messages': MSG}, idempotency_key=key))
+    assert engine.requests[0].headers['idempotency-key'] == key
+
+
+@pytest.mark.parametrize('key', [None, ''])
+async def test_no_idempotency_key_means_one_is_made(mode: str, engine: Any, key: str | None) -> None:
+    await resolve(make_client(mode, engine).chat.create({'messages': MSG}, idempotency_key=key))
+    made = engine.requests[0].headers['idempotency-key']
+    assert 1 <= len(made) <= 255 and all(0x21 <= ord(c) <= 0x7E for c in made)
 
 
 async def test_cancellation_during_the_backoff_propagates(engine: Any, monkeypatch: pytest.MonkeyPatch) -> None:

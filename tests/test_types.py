@@ -95,3 +95,23 @@ def test_meridian_imports_without_typing_extensions() -> None:
     )
     result = subprocess.run([sys.executable, '-c', code], capture_output=True, text=True, cwd=ROOT, check=False)
     assert result.returncode == 0, result.stderr
+
+
+def test_meridian_types_imports_at_run_time_without_typing_extensions() -> None:
+    # Outside TYPE_CHECKING the names exist as plain aliases of dict[str, Any], so a runtime import never raises
+    code = (
+        'import importlib.abc, sys\n'
+        'class Block(importlib.abc.MetaPathFinder):\n'
+        '    def find_spec(self, name, path=None, target=None):\n'
+        "        if name == 'typing_extensions':\n"
+        "            raise ImportError('typing_extensions is blocked')\n"
+        'sys.meta_path.insert(0, Block())\n'
+        "sys.modules.pop('typing_extensions', None)\n"
+        'from typing import Any\n'
+        'from meridian.types import ChatCompletion, ChatCompletionChunk, ChatMessage, ChatParams, ModelList, Usage\n'
+        'for alias in (ChatCompletion, ChatCompletionChunk, ChatMessage, ChatParams, ModelList, Usage):\n'
+        '    assert alias == dict[str, Any], alias\n'
+        "assert 'meridian._generated.public' not in sys.modules\n"
+    )
+    result = subprocess.run([sys.executable, '-c', code], capture_output=True, text=True, cwd=ROOT, check=False)
+    assert result.returncode == 0, result.stderr
