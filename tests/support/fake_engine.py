@@ -127,11 +127,13 @@ class _Body(httpx.SyncByteStream, httpx.AsyncByteStream):
     def __init__(self, parts: list[bytes], drop_after: int | None, hang: bool) -> None:
         self._parts, self._drop_after, self._hang = parts, drop_after, hang
         self.closed = False  # the upstream connection was closed by the client
+        self.read = 0  # parts handed to the client so far
 
     def __iter__(self) -> Iterator[bytes]:
         for i, part in enumerate(self._parts):
             if self._drop_after is not None and i >= self._drop_after:
                 raise httpx.ReadError('connection dropped')
+            self.read += 1
             yield part
 
     def close(self) -> None:
@@ -144,6 +146,7 @@ class _Body(httpx.SyncByteStream, httpx.AsyncByteStream):
         for i, part in enumerate(self._parts):
             if self._drop_after is not None and i >= self._drop_after:
                 raise httpx.ReadError('connection dropped')
+            self.read += 1
             yield part
         if self._hang:
             await asyncio.sleep(3600)
@@ -168,6 +171,10 @@ class FakeEngine:
     def upstream_closed(self) -> bool:
         """True when the client has closed every streamed response it opened (and opened at least one)."""
         return bool(self._bodies) and all(body.closed for body in self._bodies)
+
+    def parts_read(self) -> int:
+        """How many scripted stream parts the client has read, across every streamed response."""
+        return sum(body.read for body in self._bodies)
 
     def bodies(self) -> list[Any]:
         return [json.loads(r.content) if r.content else None for r in self.requests]

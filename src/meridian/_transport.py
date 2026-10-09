@@ -145,7 +145,7 @@ class _Shared:
     def decode(call: Call, response: httpx.Response, text: str) -> Result[Any]:
         try:
             data: Any = json.loads(text)
-        except ValueError:
+        except (ValueError, RecursionError):  # RecursionError: nested deeper than the parser allows
             return Err(client_error('network_error', 'The response was not valid JSON.', response.status_code))
         if call.object_body and not isinstance(data, dict):
             return Err(client_error('network_error', 'The response was not a JSON object.', response.status_code))

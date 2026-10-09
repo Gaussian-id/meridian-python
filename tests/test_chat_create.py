@@ -129,6 +129,17 @@ async def test_a_2xx_body_that_is_not_an_object_is_a_network_error_with_the_real
 
 
 @pytest.mark.fake_only
+async def test_a_2xx_body_nested_too_deep_to_parse_is_a_network_error_never_a_raise(mode: str, engine: Any) -> None:
+    deep = '[' * 100_000 + ']' * 100_000
+    engine.next(Scripted(text=deep), Scripted(text=deep))
+    client = make_client(mode, engine)
+    created = await resolve(client.chat.create({'messages': MSG}))
+    listed = await resolve(client.models.list())
+    assert (created.error.code, created.error.status) == ('network_error', 200)
+    assert (listed.error.code, listed.error.status) == ('network_error', 200)
+
+
+@pytest.mark.fake_only
 async def test_async_client_works_as_a_context_manager_and_closes() -> None:
     engine = make_engine()
     transport: Any = engine.transport

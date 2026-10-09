@@ -189,7 +189,7 @@ class ChatStream:
     def text(self) -> Result[str]:
         return self._state.result(''.join(c.delta for c in self))
 
-    def iter_bytes(self) -> Iterator[bytes]:
+    def iter_bytes(self) -> Generator[bytes, None, None]:
         """The engine's events byte for byte (content-decoding undone), once: for forwarding to a browser."""
         # [1] A stream is read once
         state = self._state
@@ -289,7 +289,7 @@ class AsyncChatStream:
     async def text(self) -> Result[str]:
         return self._state.result(''.join([c.delta async for c in self]))
 
-    async def aiter_bytes(self) -> AsyncIterator[bytes]:
+    async def aiter_bytes(self) -> AsyncGenerator[bytes, None]:
         """The engine's events byte for byte (content-decoding undone), once: for forwarding to a browser."""
         # [1] A stream is read once
         state = self._state
