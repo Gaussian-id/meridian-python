@@ -338,15 +338,40 @@ _BLANK_LINE = re.compile(_LINE_END + _LINE_END)
 _LINE_BREAK = re.compile(r'\r\n|\r|\n')
 _BOM = chr(0xFEFF)  # a byte order mark opening the stream is not part of the first event
 _BACK_OFF = 3  # a blank line is at most 4 bytes: the last 3 are searched again when the next piece arrives
-_Judgement = Literal['pass', 'hide', 'not_json', 'unjudgeable']
+_Verdict = Literal['pass', 'hide', 'terminal']
+_Judgement = Literal['pass', 'hide', 'terminal', 'not_json', 'unjudgeable']
+_NUMBER = object()  # stands for any number in a judged event: its value never matters, but it is never null
 
 
-def _skip(_: str) -> None:
-    return None
+def _skip(_: str) -> object:
+    return _NUMBER
+
+
+def _error_verdict(value: Any) -> tuple[_Verdict, str | None]:
+    """What a parsed reply or event says through an `error` key, with the request id its envelope carries, if any:
+    nothing (pass); an envelope about the app's own key, account or credit, or with a code this SDK does not know
+    (hide); or a key that is set but is no object with a usable code (terminal)."""
+    # [1] No error key, or a null one, is an ordinary reply (the engine builds its chunks and completions without one)
+    error: Any = cast('dict[str, Any]', value).get('error') if isinstance(value, dict) else None
+    if error is None:
+        return 'pass', None
+
+    # [2] A key that is set must be an object with a non-empty string code; anything else cannot be read: terminal
+    fields = cast('dict[str, Any]', error) if isinstance(error, dict) else {}
+    code, request_id = fields.get('code'), fields.get('request_id')
+    carried = request_id if isinstance(request_id, str) else None
+    if not (isinstance(code, str) and code):
+        return 'terminal', carried
+
+    # [3] A code this SDK knows that is not about the app's own key, account or credit passes as it is
+    if code in STATUS_BY_CODE and code not in APP_CREDENTIAL_CODES:
+        return 'pass', None
+    return 'hide', carried
 
 
 def _judge(event: bytes, first: bool) -> tuple[_Judgement, str | None]:
-    """One event, as a browser would read it: hidden (with its request id), passable, not JSON, or unjudgeable."""
+    """One event, as a browser would read it: passable, hidden or terminal (each with its request id), not JSON, or
+    unjudgeable."""
     # [1] The data lines in any line ending, a value's one leading space dropped, the stream's BOM ignored
     if len(event) > MAX_EVENT_BYTES:
         return 'unjudgeable', None
@@ -365,23 +390,16 @@ def _judge(event: bytes, first: bool) -> tuple[_Judgement, str | None]:
     except ValueError:
         return 'not_json', None
 
-    # [3] An error envelope passes only with a code this SDK knows that is not about the app's own key, account or
-    # credit; a missing, empty or non-string code, or an unrecognised one, is hidden
-    error: Any = cast('dict[str, Any]', value).get('error') if isinstance(value, dict) else None
-    if not isinstance(error, dict):
-        return 'pass', None
-    fields = cast('dict[str, Any]', error)
-    code, request_id = fields.get('code'), fields.get('request_id')
-    if isinstance(code, str) and code in STATUS_BY_CODE and code not in APP_CREDENTIAL_CODES:
-        return 'pass', None
-    return 'hide', request_id if isinstance(request_id, str) else None
+    # [3] An error key decides: ordinary, hidden, or terminal
+    return _error_verdict(value)
 
 
 class _Guard:
     """Judges the engine's events before any byte reaches the browser; the same logic for sync and async.
 
     Only whole events go out: as they came, or the generic frame for a hidden code. An event that cannot be judged
-    (too large, too deep, or cut off) ends the stream closed instead: `closed` is set and nothing more may be read.
+    (too large, too deep, or cut off) or whose `error` key is no envelope with a code ends the stream closed instead:
+    `closed` is set and nothing more may be read.
     """
 
     def __init__(self, request_id: str | None) -> None:
@@ -401,11 +419,11 @@ class _Guard:
             event = bytes(buffer[begin : match.end()])
             begin = self._searched = match.end()
 
-            # [2] Each one judged whole: an unjudgeable one fails the stream closed
+            # [2] Each one judged whole: an unjudgeable or terminal one fails the stream closed
             verdict, request_id = _judge(event, self._first)
             self._first = False
-            if verdict == 'unjudgeable':
-                return bytes(out) + self.fail()
+            if verdict in ('unjudgeable', 'terminal'):
+                return bytes(out) + self.fail(request_id)
             out += _generic_frame(request_id or self._request_id) if verdict == 'hide' else event
         del buffer[:begin]
 
@@ -425,14 +443,15 @@ class _Guard:
         if verdict == 'pass':
             return rest
 
-        # [2] A hidden one is replaced; one that cannot be read (cut off, or unjudgeable) fails closed
-        return _generic_frame(request_id or self._request_id) if verdict == 'hide' else self.fail()
+        # [2] A hidden one is replaced; one that cannot be read (cut off, unjudgeable, or terminal) fails closed
+        return _generic_frame(request_id or self._request_id) if verdict == 'hide' else self.fail(request_id)
 
-    def fail(self) -> bytes:
-        """Drop the unjudged bytes and end the stream with the generic frame, after a blank line closing any event."""
+    def fail(self, request_id: str | None = None) -> bytes:
+        """Drop the unjudged bytes and end the stream with the generic frame (carrying `request_id`, else the
+        response's), after a blank line closing any event."""
         self._buffer.clear()
         self.closed = True
-        return b'\n\n' + _generic_frame(self._request_id)
+        return b'\n\n' + _generic_frame(request_id or self._request_id)
 
 
 def _relay(stream: ChatStream) -> Generator[bytes, None, None]:
@@ -547,7 +566,15 @@ def _streaming(request_id: str | None, body: ReplyBody | AsyncReplyBody) -> Repl
 
 
 def _buffered(result: Result[Any]) -> Reply:
-    return _browser_error(result.error) if result.error is not None else _json_reply(200, result.data)
+    if result.error is not None:
+        return _browser_error(result.error)
+
+    # The engine answers a failure with its error status, never a 200: a 200 that carries an `error` key (other than
+    # null) is served on only as the generic 503, whatever the key holds
+    verdict, request_id = _error_verdict(result.data)
+    if verdict != 'pass':
+        return _json_reply(503, _generic(request_id), request_id)
+    return _json_reply(200, result.data)
 
 
 # --- The two helpers ------------------------------------------------------------------------------------------------

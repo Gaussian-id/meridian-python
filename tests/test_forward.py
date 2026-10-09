@@ -681,6 +681,58 @@ async def test_an_error_whose_code_is_missing_or_not_a_string_is_a_generic_503(
     assert isinstance(reply.body, bytes) and b'account 42' not in reply.body
 
 
+def carried_id(error: Any) -> str | None:
+    """The request id an error value carries: only an object can carry one."""
+    return cast('dict[str, str]', error).get('request_id') if isinstance(error, dict) else None
+
+
+# What an `error` key may hold without being the engine's envelope (an object with a code)
+NOT_AN_ENVELOPE = [
+    pytest.param('boom', id='string'),
+    pytest.param('', id='empty-string'),
+    pytest.param(123, id='number'),
+    pytest.param(0, id='zero'),
+    pytest.param(True, id='true'),
+    pytest.param(False, id='false'),
+    pytest.param(['boom'], id='list'),
+    pytest.param([], id='empty-list'),
+    pytest.param({}, id='empty-object'),
+]
+
+
+@pytest.mark.parametrize('stream', [False, True], ids=['buffered', 'before-the-stream'])
+@pytest.mark.parametrize('error', [*NOT_AN_ENVELOPE, pytest.param(None, id='null')])
+async def test_an_error_status_whose_error_is_not_an_envelope_is_a_generic_503(
+    mode: str, engine: Any, error: object, stream: bool
+) -> None:
+    engine.next(Scripted(status=402, headers={'x-request-id': 'req_h'}, json={'error': error}))
+    reply = await send(build(mode, engine), {'messages': MSG, 'stream': stream})
+    assert reply.status == 503 and payload(reply) == generic('req_h')
+    assert isinstance(reply.body, bytes) and b'boom' not in reply.body
+
+
+@pytest.mark.parametrize(
+    'error',
+    [
+        *NOT_AN_ENVELOPE,
+        pytest.param(envelope('insufficient_credit', 'req_200')['error'], id='hidden-code'),
+        pytest.param(envelope('subscription_expired', 'req_200')['error'], id='unrecognised-code'),
+    ],
+)
+async def test_a_200_reply_with_an_error_key_is_a_generic_503(mode: str, engine: Any, error: Any) -> None:
+    # The engine answers a failure with its error status, never a 200: a 200 that carries an error is not served on
+    engine.next(Scripted(json={**completion('hey'), 'error': error}))
+    reply = await send(build(mode, engine), {'messages': MSG})
+    assert reply.status == 503 and payload(reply) == generic(carried_id(error))
+    assert isinstance(reply.body, bytes) and b'hey' not in reply.body and b'insufficient_credit' not in reply.body
+
+
+async def test_a_200_reply_with_a_null_error_key_is_an_ordinary_reply(mode: str, engine: Any) -> None:
+    engine.next(Scripted(json={**completion('hey'), 'error': None}))
+    reply = await send(build(mode, engine), {'messages': MSG})
+    assert reply.status == 200 and payload(reply)['choices'][0]['message']['content'] == 'hey'
+
+
 # --- Streaming ------------------------------------------------------------------------------------------------------
 
 
@@ -784,6 +836,56 @@ async def test_a_mid_stream_error_frame_without_any_code_or_id_takes_the_respons
     wire = frame(chunk('a')).encode() + b'data: {"error": {}}\n\n'
     out = await drain(await stream_reply(mode, engine, [wire], headers={'x-request-id': 'req_h'}))
     assert last_event(out) == generic('req_h')
+
+
+# An error key that is set (not null) but is no object with a non-empty string `code` ends the stream closed
+TERMINAL_ERRORS = [
+    *NOT_AN_ENVELOPE,
+    *[pytest.param(bad_error(code.values[0]), id=f'code-{code.id}') for code in BAD_CODES],
+]
+
+
+def terminal_wire(error: Any) -> tuple[bytes, bytes, bytes, str]:
+    """The first chunk, the frame with the bad error key, the rest the engine would have sent, the id to expect."""
+    first, rest = frame(chunk('a')).encode(), frame(chunk('after')).encode() + frame('[DONE]').encode()
+    bad = f'data: {json.dumps({"error": error})}\n\n'.encode()
+    return first, bad, rest, carried_id(error) or 'req_h'
+
+
+@pytest.mark.parametrize('error', TERMINAL_ERRORS)
+async def test_an_error_key_that_is_no_envelope_with_a_code_ends_the_stream_closed(
+    mode: str, engine: Any, error: Any
+) -> None:
+    first, bad, rest, request_id = terminal_wire(error)
+    reply = await stream_reply(mode, engine, [first, bad, *pieces(rest, 20)], headers={'x-request-id': 'req_h'})
+    out = await drain(reply)
+    assert b'after' not in out and b'[DONE]' not in out and b'boom' not in out and b'account 42' not in out
+    assert out.startswith(first) and last_event(out) == generic(request_id) and out.endswith(b'}}\n\n')
+    assert engine.upstream_closed() and engine.parts_read() == 2  # nothing after the frame is even read
+
+
+@pytest.mark.parametrize('error', TERMINAL_ERRORS)
+async def test_an_error_key_that_is_no_envelope_ends_the_stream_closed_whatever_the_pieces(
+    mode: str, engine: Any, error: Any
+) -> None:
+    first, bad, rest, request_id = terminal_wire(error)
+    reply = await stream_reply(mode, engine, pieces(first + bad + rest, 1), headers={'x-request-id': 'req_h'})
+    out = await drain(reply)
+    assert b'after' not in out and b'[DONE]' not in out and engine.upstream_closed()
+    assert out.startswith(first) and last_event(out) == generic(request_id)
+
+
+async def test_the_last_event_without_its_blank_line_with_a_bad_error_key_ends_closed(mode: str, engine: Any) -> None:
+    wire = frame(chunk('a')).encode() + b'data: {"error": "boom"}'
+    out = await drain(await stream_reply(mode, engine, [wire], headers={'x-request-id': 'req_h'}))
+    assert b'boom' not in out
+    assert out.startswith(frame(chunk('a')).encode()) and last_event(out) == generic('req_h')
+
+
+async def test_a_null_error_key_is_an_ordinary_chunk(mode: str, engine: Any) -> None:
+    # The engine builds every chunk from fixed keys and never sends an `error` on one; a null is no failure
+    wire = frame({**chunk('a'), 'error': None}).encode() + frame({'error': None}).encode() + frame('[DONE]').encode()
+    assert await drain(await stream_reply(mode, engine, pieces(wire, 5))) == wire
 
 
 @pytest.mark.parametrize('size', [1, 7, 100_000])
