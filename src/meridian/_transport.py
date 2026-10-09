@@ -14,7 +14,18 @@ from ._version import __version__
 
 _NO_BODY: Any = object()
 
-__all__ = ['DEFAULT_MAX_RETRIES', 'DEFAULT_TIMEOUT', 'Call', 'RefusedTransport', 'SyncTransport', 'new_idempotency_key']
+__all__ = [
+    'DEFAULT_MAX_RETRIES',
+    'DEFAULT_TIMEOUT',
+    'AsyncRefusedTransport',
+    'AsyncTransport',
+    'Call',
+    'RefusedTransport',
+    'SyncTransport',
+    'new_idempotency_key',
+]
+
+_SEND_ERRORS = (httpx.HTTPError, httpx.InvalidURL, UnicodeError)  # what a send may raise that becomes an Err
 
 
 @dataclass(frozen=True)
@@ -25,6 +36,7 @@ class Call:
     body: Any = _NO_BODY
     headers: Mapping[str, str] = field(default_factory=lambda: {})
     retry: bool = True  # False: not safe to repeat once it may have reached the server
+    object_body: bool = False  # True: a 2xx body that is not a JSON object is a transport failure
 
 
 def new_idempotency_key() -> str:
@@ -32,6 +44,8 @@ def new_idempotency_key() -> str:
 
 
 class _Shared:
+    """Everything the sync and async transports have in common: only the I/O differs."""
+
     def __init__(self, base_url: str, key: str | None, timeout: object, max_retries: object) -> None:
         self.base = base_url.rstrip('/')
         self.key = key
@@ -64,16 +78,31 @@ class _Shared:
         )
 
     def failure(self, exc: BaseException) -> MeridianError:
+        if not isinstance(exc, httpx.HTTPError):  # a URL or header httpx cannot encode: our setup, not the wire
+            return config_error(f'The request could not be built: {exc}')
         if isinstance(exc, httpx.TimeoutException):
             return client_error('network_error', f'No response within {self.timeout:g} s.')
         return client_error('network_error', 'The network request failed.')
 
+    @staticmethod
+    def error_status(response: httpx.Response, text: str) -> tuple[MeridianError, str | None]:
+        error = error_from_body(response.status_code, response.headers.get('x-request-id'), text)
+        return error, response.headers.get('retry-after')
 
-def _decode_json(response: httpx.Response, text: str) -> Result[Any]:
-    try:
-        return Ok(json.loads(text))
-    except ValueError:
-        return Err(client_error('network_error', 'The response was not valid JSON.', response.status_code))
+    @staticmethod
+    def dropped(response: httpx.Response) -> Err:
+        message = 'The connection dropped while reading the response body.'
+        return Err(client_error('network_error', message, response.status_code))
+
+    @staticmethod
+    def decode(call: Call, response: httpx.Response, text: str) -> Result[Any]:
+        try:
+            data: Any = json.loads(text)
+        except ValueError:
+            return Err(client_error('network_error', 'The response was not valid JSON.', response.status_code))
+        if call.object_body and not isinstance(data, dict):
+            return Err(client_error('network_error', 'The response was not a JSON object.', response.status_code))
+        return Ok[Any](data)
 
 
 class SyncTransport:
@@ -99,10 +128,8 @@ class SyncTransport:
         # [1] Send, keeping the body unread
         try:
             response = self._client.send(self._shared.request(self._client, call), stream=True)
-        except httpx.HTTPError as exc:
+        except _SEND_ERRORS as exc:
             return None, self._shared.failure(exc), None
-        except (httpx.InvalidURL, UnicodeError) as exc:  # a URL or header httpx cannot encode: our setup, not the wire
-            return None, config_error(f'The request could not be built: {exc}'), None
         if response.is_success:
             return response, None, None
 
@@ -113,8 +140,8 @@ class SyncTransport:
             text = ''
         finally:
             response.close()
-        error = error_from_body(response.status_code, response.headers.get('x-request-id'), text)
-        return None, error, response.headers.get('retry-after')
+        error, retry_after = self._shared.error_status(response, text)
+        return None, error, retry_after
 
     def open(self, call: Call) -> Result[httpx.Response]:
         response, error, _ = self._attempt(call)
@@ -138,18 +165,86 @@ class SyncTransport:
             try:
                 text = response.read().decode('utf-8', 'replace')
             except httpx.HTTPError:
-                return Err(
-                    client_error(
-                        'network_error', 'The connection dropped while reading the response body.', response.status_code
-                    )
-                )
-            return _decode_json(response, text)
+                return self._shared.dropped(response)
+            return self._shared.decode(call, response, text)
         finally:
             response.close()
 
     def close(self) -> None:
         if self._owns:
             self._client.close()
+
+
+class AsyncTransport:
+    """SyncTransport with awaited I/O. A CancelledError is never caught: it propagates after the response closes."""
+
+    def __init__(
+        self,
+        base_url: str,
+        key: str | None,
+        *,
+        timeout: object = None,
+        max_retries: object = None,
+        http_client: httpx.AsyncClient | None = None,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
+        self._shared = _Shared(base_url, key, timeout, max_retries)
+        self._owns = http_client is None
+        self._client = http_client or httpx.AsyncClient(transport=transport)
+
+    @property
+    def max_retries(self) -> int:
+        return self._shared.max_retries
+
+    async def _attempt(self, call: Call) -> tuple[httpx.Response | None, MeridianError | None, str | None]:
+        # [1] Send, keeping the body unread
+        try:
+            response = await self._client.send(self._shared.request(self._client, call), stream=True)
+        except _SEND_ERRORS as exc:
+            return None, self._shared.failure(exc), None
+        if response.is_success:
+            return response, None, None
+
+        # [2] An error status: read its body once, then close
+        try:
+            text = (await response.aread()).decode('utf-8', 'replace')
+        except httpx.HTTPError:
+            text = ''
+        finally:
+            await response.aclose()
+        error, retry_after = self._shared.error_status(response, text)
+        return None, error, retry_after
+
+    async def open(self, call: Call) -> Result[httpx.Response]:
+        response, error, _ = await self._attempt(call)
+        if response is not None:
+            return Ok(response)
+        assert error is not None
+        return Err(error)
+
+    async def json(self, call: Call) -> Result[Any]:
+        # [1] The response, or the failure to get one
+        opened = await self.open(call)
+        if opened.error is not None:
+            return opened
+        response = opened.data
+        try:
+            # [2] No content is None data
+            if response.status_code == 204:
+                return Ok(None)
+
+            # [3] A body that drops mid-read, or is not JSON, is a transport failure
+            try:
+                text = (await response.aread()).decode('utf-8', 'replace')
+            except httpx.HTTPError:
+                return self._shared.dropped(response)
+            return self._shared.decode(call, response, text)
+        finally:
+            await response.aclose()
+
+    async def aclose(self) -> None:
+        if self._owns:
+            await self._client.aclose()
 
 
 class RefusedTransport:
@@ -167,4 +262,22 @@ class RefusedTransport:
         return Err(self._error)
 
     def close(self) -> None:
+        return None
+
+
+class AsyncRefusedTransport:
+    """The async twin of RefusedTransport."""
+
+    max_retries = 0
+
+    def __init__(self, error: MeridianError) -> None:
+        self._error = error
+
+    async def open(self, call: Call) -> Result[Any]:
+        return Err(self._error)
+
+    async def json(self, call: Call) -> Result[Any]:
+        return Err(self._error)
+
+    async def aclose(self) -> None:
         return None

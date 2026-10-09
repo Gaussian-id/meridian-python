@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Protocol, cast
 
-from ._errors import Err, Ok, Result, client_error
+from ._errors import Ok, Result
 from ._stream import token_counts
 from ._transport import Call, new_idempotency_key
 
@@ -11,10 +11,15 @@ if TYPE_CHECKING:
     from .types import ChatCompletion, ChatParams, ModelList
 
 CHAT_PATH = '/v1/chat/completions'
+MODELS_CALL = Call('GET', '/v1/models')
 
 
 class JsonTransport(Protocol):
     def json(self, call: Call) -> Result[Any]: ...
+
+
+class AsyncJsonTransport(Protocol):
+    async def json(self, call: Call) -> Result[Any]: ...
 
 
 def chat_body(params: Mapping[str, Any], stream: bool) -> dict[str, Any]:
@@ -32,13 +37,16 @@ def idempotency(key: str | None) -> dict[str, str]:
     return {'idempotency-key': key or new_idempotency_key()}
 
 
+def chat_call(params: Mapping[str, Any], idempotency_key: str | None) -> Call:
+    return Call(
+        'POST', CHAT_PATH, body=chat_body(params, False), headers=idempotency(idempotency_key), object_body=True
+    )
+
+
 def with_counts(result: Result[Any]) -> Result[Any]:
     if result.error is not None:
         return result
-    payload: Any = result.data
-    if not isinstance(payload, dict):
-        return Err(client_error('network_error', 'The response was not a JSON object.', 200))
-    data = dict(cast('dict[str, Any]', payload))
+    data = dict(cast('dict[str, Any]', result.data))  # the transport guarantees an object (Call.object_body)
     data['usage'] = token_counts(data.get('usage'))
     return Ok(data)
 
@@ -48,8 +56,7 @@ class ChatApi:
         self._transport = transport
 
     def create(self, params: ChatParams, *, idempotency_key: str | None = None) -> Result[ChatCompletion]:
-        call = Call('POST', CHAT_PATH, body=chat_body(params, False), headers=idempotency(idempotency_key))
-        return with_counts(self._transport.json(call))
+        return with_counts(self._transport.json(chat_call(params, idempotency_key)))
 
 
 class ModelsApi:
@@ -57,4 +64,20 @@ class ModelsApi:
         self._transport = transport
 
     def list(self) -> Result[ModelList]:
-        return self._transport.json(Call('GET', '/v1/models'))
+        return self._transport.json(MODELS_CALL)
+
+
+class AsyncChatApi:
+    def __init__(self, transport: AsyncJsonTransport) -> None:
+        self._transport = transport
+
+    async def create(self, params: ChatParams, *, idempotency_key: str | None = None) -> Result[ChatCompletion]:
+        return with_counts(await self._transport.json(chat_call(params, idempotency_key)))
+
+
+class AsyncModelsApi:
+    def __init__(self, transport: AsyncJsonTransport) -> None:
+        self._transport = transport
+
+    async def list(self) -> Result[ModelList]:
+        return await self._transport.json(MODELS_CALL)

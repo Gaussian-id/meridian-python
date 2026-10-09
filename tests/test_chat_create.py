@@ -1,10 +1,12 @@
 import json
 from typing import TYPE_CHECKING, Any
 
+import anyio
 import httpx
 import pytest
 
 from meridian import AsyncMeridian, Meridian, Ok
+from tests.support.engine import make_engine
 from tests.support.fake_engine import Scripted, completion, engine_error
 from tests.support.modes import make_client, resolve
 
@@ -117,3 +119,30 @@ def test_a_result_narrows_on_error_is_none(engine: Any) -> None:
         assert isinstance(result, Ok)
     else:
         raise AssertionError(result.error)
+
+
+@pytest.mark.fake_only
+async def test_a_2xx_body_that_is_not_an_object_is_a_network_error_with_the_real_status(mode: str, engine: Any) -> None:
+    engine.next(Scripted(status=201, text='[1, 2]'))
+    result = await resolve(make_client(mode, engine).chat.create({'messages': MSG}))
+    assert (result.error.code, result.error.status) == ('network_error', 201)
+
+
+@pytest.mark.fake_only
+async def test_async_client_works_as_a_context_manager_and_closes() -> None:
+    engine = make_engine()
+    transport: Any = engine.transport
+    async with AsyncMeridian(engine.public_url, engine.project_key, transport=transport) as client:
+        assert (await client.models.list()).error is None
+    await client.aclose()  # closing twice is harmless
+
+
+@pytest.mark.fake_only
+@pytest.mark.parametrize('backend', ['asyncio'])
+async def test_cancelling_during_a_body_read_propagates_cancelled_error(engine: Any, backend: str) -> None:
+    engine.next(Scripted(chunks=[b'{'], hang=True))
+    transport: Any = engine.transport
+    client = AsyncMeridian(engine.public_url, engine.project_key, transport=transport)
+    with anyio.move_on_after(0.2) as scope:
+        await client.chat.create({'messages': MSG})
+    assert scope.cancelled_caught  # the call was cancelled, never turned into an Err
