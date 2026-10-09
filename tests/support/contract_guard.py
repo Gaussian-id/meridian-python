@@ -5,12 +5,12 @@ Everything here reports names only. No value of an environment variable or env f
 
 from __future__ import annotations
 
-import heapq
 import ipaddress
 import os
 import re
+import unicodedata
 import urllib.request
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -21,89 +21,42 @@ ENV_FILE = 'meridian-engine.env'
 DEFAULT_URLS = {'MERIDIAN_PUBLIC_URL': 'http://127.0.0.1:8180', 'MERIDIAN_ADMIN_URL': 'http://127.0.0.1:8181'}
 PROXY_SCHEMES = ('http', 'https', 'all')
 
-# What compose skips after `=`. Every other character, \x1c and \xa0 included, is a value (Python's \s is wider).
-BLANK = ' \t\v\f\r'
-_B = r'[ \t\v\f\r]'
-# [export|set] ["]NAME [=:] , the name being the whole word; or any other statement `anything =:`
-_PAID_HEAD = re.compile(rf'(?:(?:export|set){_B}+)?(")?({"|".join(PAID_KEYS)}){_B}*[=:]{_B}*', re.IGNORECASE)
-_ANY_HEAD = re.compile(rf'[^=:\n]*[=:]{_B}*')
+# Characters that one reader skips, ignores or breaks a line at while another does not (compose treats NBSP and NEL as
+# blank; a culture-sensitive StartsWith ignores soft hyphens, joiners and C0 controls; a lone CR ends a line for
+# local-up but not for compose): control characters other than tab, LF and the CR of a CRLF, and every default-ignorable
+# code point. Any other non-ASCII space or format character (Zs, Zl, Zp, Cf) is refused too.
+_HIDING = re.compile(
+    r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\xa0\xad\U0000034f\U0000061c\U0000115f\U00001160\U000017b4\U000017b5'
+    r'\U0000180b-\U0000180f\U0000200b-\U0000200f\U00002028-\U0000202e\U00002060-\U0000206f\U00003164'
+    r'\U0000fe00-\U0000fe0f\U0000feff\U0000ffa0\U0000fff0-\U0000fff8\U0001bca0-\U0001bca3'
+    r'\U0001d173-\U0001d17a\U000e0000-\U000e0fff]|\r(?!\n)'
+)
+_FOLDED = [name.casefold() for name in PAID_KEYS]
+# The only line with a paid name that leaves it unset: `[export |set ]NAME =` (or `:`), then nothing, `""` or `''`
+_EMPTY = re.compile(rf'(?:(?:export|set)[ \t]+)?(?:{"|".join(_FOLDED)})[ \t]*[=:](?:""|\'\')?')
 
 
-def _line_end(text: str, start: int) -> int:
-    end = text.find('\n', start)
-    return len(text) if end < 0 else end
-
-
-def _closings(text: str, start: int, quote: str) -> set[int]:
-    """Where a quote opened at `start` may close. Parsers disagree on escapes, so every reading is followed: the next
-    quote; the next one no backslash precedes (compose); the next one a backslash-pair escape does not hide."""
-    ends: set[int] = set()
-    first = text.find(quote, start + 1)
-    if first >= 0:
-        ends.add(first)
-    i = first
-    while i >= 0 and text[i - 1] == '\\':
-        i = text.find(quote, i + 1)
-    if i >= 0:
-        ends.add(i)
-    i = start + 1
-    while i < len(text) and text[i] != quote:
-        i += 2 if text[i] == '\\' else 1
-    if i < len(text):
-        ends.add(i)
-    return ends
-
-
-def _scan(text: str) -> list[str]:
-    """Paid keys that get a value in `text`, read as compose reads it: statements `NAME=value`, a value running to
-    the end of the line (a line ends at \\n), a quoted value ending at its closing quote, and after that quote
-    another statement can follow on the same line. A quote may also be read as ending its line. Where a statement
-    may start in more than one way, all of them are followed."""
-    names: list[str] = []
-    seen: set[int] = set()
-    todo = [0]
-    while todo:
-        start = heapq.heappop(todo)
-        if start in seen:
-            continue
-        seen.add(start)
-        pos = start
-        while pos < len(text) and text[pos].isspace():
-            pos += 1
-        if pos >= len(text):
-            continue
-        line_end = _line_end(text, pos)
-        paid = _PAID_HEAD.match(text, pos)
-        head = paid or _ANY_HEAD.match(text, pos)
-        heapq.heappush(todo, line_end)
-        if text[pos] == '#' or head is None:  # a comment, or a line that is not a statement
-            continue
-        value = head.end()
-        if paid and paid.group(1):  # set "NAME=value"
-            rest = text[value:line_end].strip(BLANK)
-            rest = rest[:-1].rstrip(BLANK) if rest.endswith('"') else rest
-            has_value = rest not in ('', '""', "''")
-        elif value >= line_end:
-            has_value = False
-        elif text[value] in '"\'':
-            has_value = text[value + 1 : value + 2] != text[value]  # `""` is empty; an unclosed quote is not
-            for end in _closings(text, value, text[value]):
-                heapq.heappush(todo, end + 1)  # the statement after the closing quote
-        else:
-            has_value = True  # even `#abc`: whether it is a comment depends on the parser
-        if paid and has_value and paid.group(2).upper() not in names:
-            names.append(paid.group(2).upper())
-    return names
+def _hides(text: str) -> bool:
+    return _HIDING.search(text) is not None or any(
+        c > '\x7f' and unicodedata.category(c) in ('Zs', 'Zl', 'Zp', 'Cf') for c in text
+    )
 
 
 def paid_keys_in(text: str) -> list[str]:
-    """Names of the paid provider keys that have a value in an env file's text. Never returns values. The text is
-    read as compose reads it (lines end at \\n) and as local-up.ps1 does (at \\r\\n, \\r and \\n); a name set under
-    either reading is set."""
-    text = text.lstrip('﻿')
+    """Names of the paid provider keys an env file's text may set. Never returns values. Not a parser but an
+    allowlist: a line that names a paid key (without case, Kelvin sign and long s folded) sets it unless the line is
+    exactly an empty assignment, so a whitespace-only value is set. A text with a hiding character cannot be checked
+    and reports both names. A comment line is skipped unless it holds a quote, which may close a quoted value."""
+    text = text.removeprefix('\N{BYTE ORDER MARK}')
+    if _hides(text):
+        return list(PAID_KEYS)
     names: list[str] = []
-    for reading in (text, re.sub(r'\r\n|\r', '\n', text)):
-        names += [name for name in _scan(reading) if name not in names]
+    for line in re.split(r'\r\n|\r|\n', text):
+        folded = line.casefold()
+        comment = folded.lstrip(' \t').startswith('#') and not any(quote in line for quote in '"\'`')
+        if comment or _EMPTY.fullmatch(folded):
+            continue
+        names += [name for name, key in zip(PAID_KEYS, _FOLDED, strict=True) if key in folded and name not in names]
     return names
 
 
@@ -174,12 +127,15 @@ def runtime_dir(environ: Mapping[str, str]) -> Path | None:
 
 def proxy_schemes(environ: Mapping[str, str]) -> list[str]:
     """Schemes (http, https, all) for which a proxy is configured: in this environment, in the process's, or in the
-    system (the registry on Windows). Names only; a proxy would carry the suite's traffic and local keys off-machine."""
-    system = urllib.request.getproxies()
+    Windows registry. The registry is always read, because getproxies() skips it once any *_proxy variable (even
+    no_proxy) is set. Names only; a proxy would carry the suite's traffic and local keys off-machine."""
+    registry: Callable[[], Mapping[str, str]] | None = getattr(urllib.request, 'getproxies_registry', None)
+    systems = [urllib.request.getproxies(), registry() if registry else {}]
     return [
         scheme
         for scheme in PROXY_SCHEMES
-        if system.get(scheme) or any(v and k.lower() == f'{scheme}_proxy' for k, v in environ.items())
+        if any(system.get(scheme) for system in systems)
+        or any(v and k.lower() == f'{scheme}_proxy' for k, v in environ.items())
     ]
 
 
@@ -189,7 +145,7 @@ def _paid_keys_in_file(path: Path) -> list[str] | None:
         data = path.read_bytes()
         if b'\x00' in data:  # UTF-16 and binary files hide names from a text scan
             return None
-        return paid_keys_in(data.decode('utf-8-sig'))
+        return paid_keys_in(data.decode('utf-8'))  # paid_keys_in drops one byte order mark; a second one hides
     except (OSError, UnicodeDecodeError):
         return None
 

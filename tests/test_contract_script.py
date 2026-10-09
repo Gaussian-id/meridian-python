@@ -67,11 +67,13 @@ def run_main(environ: dict[str, str], calls: Calls) -> int:
 def no_system_proxy(monkeypatch: pytest.MonkeyPatch) -> None:
     """The guard asks the system for proxies (registry on Windows); a test must not depend on this machine's."""
     monkeypatch.setattr(urllib.request, 'getproxies', lambda: dict[str, str]())
+    monkeypatch.setattr(urllib.request, 'getproxies_registry', lambda: dict[str, str](), raising=False)
 
 
 def test_the_command_it_would_run_is_the_suite_without_the_fake_only_tests() -> None:
-    # --frozen: no resolving or syncing from an index; --no-env-file: a .env or UV_ENV_FILE cannot inject variables
-    assert script.COMMAND == ['uv', 'run', '--frozen', '--no-env-file', 'pytest', '-m', 'not fake_only']
+    # --frozen: no resolving or syncing; --offline: no index or network at all; --no-env-file: a .env or UV_ENV_FILE
+    # cannot inject variables
+    assert script.COMMAND == ['uv', 'run', '--frozen', '--offline', '--no-env-file', 'pytest', '-m', 'not fake_only']
 
 
 def test_a_paid_key_in_the_env_file_refuses_before_anything_runs(
@@ -155,6 +157,19 @@ def test_a_system_proxy_refuses_before_anything_runs(
     calls = Calls()
     assert run_main(environ, calls) == 1
     assert 'https' in capsys.readouterr().err
+    assert (calls.ready_urls, calls.runs) == ([], [])
+
+
+def test_a_registry_proxy_masked_by_no_proxy_refuses_before_anything_runs(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    environ, _ = runtime_with(tmp_path)
+    monkeypatch.setattr(urllib.request, 'getproxies', lambda: {'no': '127.0.0.1'})
+    registry = {'http': 'http://reg.example:3128'}
+    monkeypatch.setattr(urllib.request, 'getproxies_registry', lambda: registry, raising=False)
+    calls = Calls()
+    assert run_main(environ, calls) == 1
+    assert 'http' in capsys.readouterr().err
     assert (calls.ready_urls, calls.runs) == ([], [])
 
 

@@ -1,7 +1,11 @@
+import json
 import os
+import shutil
 import subprocess
 import sys
 import urllib.request
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -31,94 +35,307 @@ SECRET = 'v' + 'q' * 24  # a stand-in value, built at run time; no message may e
 def no_system_proxy(monkeypatch: pytest.MonkeyPatch) -> None:
     """The guard asks the system for proxies (registry on Windows); a test must not depend on this machine's."""
     monkeypatch.setattr(urllib.request, 'getproxies', lambda: dict[str, str]())
+    monkeypatch.setattr(urllib.request, 'getproxies_registry', lambda: dict[str, str](), raising=False)
 
 
 # -- the env file text ---------------------------------------------------------------------------------------------
 
+BOTH = [GEMINI, OPENROUTER]  # what a text that cannot be checked reports
 
-@pytest.mark.parametrize(
-    ('text', 'names'),
-    [
-        ('GAUSSMERIDIAN_GEMINI_API_KEY=abc', [GEMINI]),
-        ('export GAUSSMERIDIAN_OPENROUTER_API_KEY="x"\r\n', [OPENROUTER]),
-        ('gaussmeridian_gemini_api_key = y', [GEMINI]),
-        ('set GAUSSMERIDIAN_GEMINI_API_KEY=abc\r\n', [GEMINI]),
-        ('SET GAUSSMERIDIAN_OPENROUTER_API_KEY=abc', [OPENROUTER]),
-        ('set "GAUSSMERIDIAN_GEMINI_API_KEY=abc"', [GEMINI]),
-        ('   export    GAUSSMERIDIAN_GEMINI_API_KEY   =   "abc"   ', [GEMINI]),
-        ("GAUSSMERIDIAN_GEMINI_API_KEY='abc'", [GEMINI]),
-        ('GAUSSMERIDIAN_GEMINI_API_KEY: abc', [GEMINI]),
-        ('\ufeffGAUSSMERIDIAN_GEMINI_API_KEY=abc', [GEMINI]),
-        ('A=1\rGAUSSMERIDIAN_GEMINI_API_KEY=abc\rB=2', [GEMINI]),
-        ('GAUSSMERIDIAN_GEMINI_API_KEY=abc # trailing comment', [GEMINI]),
-        # a quoted value that runs over several lines is a value
-        ('GAUSSMERIDIAN_GEMINI_API_KEY="line one\nline two"\nB=2', [GEMINI]),
-        ("GAUSSMERIDIAN_OPENROUTER_API_KEY='a\r\nb\r\n'", [OPENROUTER]),
-        ('GAUSSMERIDIAN_GEMINI_API_KEY="', [GEMINI]),
-        ('GAUSSMERIDIAN_GEMINI_API_KEY="a\\"b"', [GEMINI]),
-        # whitespace inside quotes is still a value, and a `#` straight after `=` is not a comment for every parser
-        ('GAUSSMERIDIAN_GEMINI_API_KEY=" "', [GEMINI]),
-        ('GAUSSMERIDIAN_GEMINI_API_KEY=#abc', [GEMINI]),
-        ('GAUSSMERIDIAN_GEMINI_API_KEY=   # looks empty', [GEMINI]),
-        # any line that sets it counts, even if a later one empties it
-        ('GAUSSMERIDIAN_GEMINI_API_KEY=abc\nGAUSSMERIDIAN_GEMINI_API_KEY=\n', [GEMINI]),
-        (f'{OPENROUTER}=a\n{GEMINI}=b\n{OPENROUTER}=c', [OPENROUTER, GEMINI]),
-        # compose breaks lines on \n only and skips \r after `=`; local-up.ps1 also breaks on \r: a name set under
-        # either reading is set
-        ('GAUSSMERIDIAN_GEMINI_API_KEY=   \rVAL', [GEMINI]),
-        ('GAUSSMERIDIAN_GEMINI_API_KEY=\rVAL', [GEMINI]),
-        ('GAUSSMERIDIAN_GEMINI_API_KEY=\r"VAL"', [GEMINI]),
-        ('GAUSSMERIDIAN_GEMINI_API_KEY=\r#VAL', [GEMINI]),
-        ('GAUSSMERIDIAN_GEMINI_API_KEY=\rA=1', [GEMINI]),
-        ('GAUSSMERIDIAN_GEMINI_API_KEY\r=VAL', [GEMINI]),
-        ('export\rGAUSSMERIDIAN_GEMINI_API_KEY=VAL', [GEMINI]),
-        # a quoted empty value is followed by a new statement on the same line (compose)
-        ('GAUSSMERIDIAN_GEMINI_API_KEY=""GAUSSMERIDIAN_GEMINI_API_KEY=VAL', [GEMINI]),
-        ('A="" GAUSSMERIDIAN_OPENROUTER_API_KEY=VAL', [OPENROUTER]),
-        ("A='' GAUSSMERIDIAN_OPENROUTER_API_KEY=VAL", [OPENROUTER]),
-        ('A="x\nline" GAUSSMERIDIAN_OPENROUTER_API_KEY=VAL', [OPENROUTER]),
-        ('A="x" GAUSSMERIDIAN_OPENROUTER_API_KEY=VAL', [OPENROUTER]),
-        ('A="a\\" GAUSSMERIDIAN_OPENROUTER_API_KEY=VAL', [OPENROUTER]),
-        ('A="x\nGAUSSMERIDIAN_OPENROUTER_API_KEY=VAL\n"', [OPENROUTER]),
-        # blank is space, tab, VT, FF and CR; every other character is a value (Python's \s would call \x1c blank)
-        ('GAUSSMERIDIAN_GEMINI_API_KEY=\x1c', [GEMINI]),
-        ('GAUSSMERIDIAN_GEMINI_API_KEY=\x1c\n', [GEMINI]),
-        ('GAUSSMERIDIAN_GEMINI_API_KEY=\x85', [GEMINI]),
-        ('GAUSSMERIDIAN_GEMINI_API_KEY=\xa0', [GEMINI]),
-        ('GAUSSMERIDIAN_GEMINI_API_KEY=\N{LINE SEPARATOR}', [GEMINI]),
-        ('GAUSSMERIDIAN_GEMINI_API_KEY=\N{ZERO WIDTH SPACE}', [GEMINI]),
-        ('GAUSSMERIDIAN_GEMINI_API_KEY=\N{ZERO WIDTH NO-BREAK SPACE}', [GEMINI]),
-        ('GAUSSMERIDIAN_GEMINI_API_KEY=\vVAL', [GEMINI]),
-        ('GAUSSMERIDIAN_GEMINI_API_KEY=${UNSET:-VAL}', [GEMINI]),
-        ('GAUSSMERIDIAN_GEMINI_API_KEY=$X', [GEMINI]),
-        ('GAUSSMERIDIAN_GEMINI_API_KEY="\r"', [GEMINI]),
-        # not keys
-        ('# GAUSSMERIDIAN_GEMINI_API_KEY=abc', []),
-        ('   # export GAUSSMERIDIAN_GEMINI_API_KEY=abc', []),
-        ('REM set GAUSSMERIDIAN_GEMINI_API_KEY=abc', []),
-        ('OTHER=1 # GAUSSMERIDIAN_GEMINI_API_KEY=abc', []),
-        ('GAUSSMERIDIAN_GEMINI_API_KEY=', []),
-        ('GAUSSMERIDIAN_GEMINI_API_KEY=   \r\n', []),
-        ('GAUSSMERIDIAN_GEMINI_API_KEY=""', []),
-        ("GAUSSMERIDIAN_GEMINI_API_KEY=''  # empty", []),
-        ('set GAUSSMERIDIAN_GEMINI_API_KEY=', []),
-        ('set "GAUSSMERIDIAN_GEMINI_API_KEY="', []),
-        ('export GAUSSMERIDIAN_GEMINI_API_KEY', []),
-        ('GAUSSMERIDIAN_GEMINI_API_KEY=\v\n', []),
-        ('GAUSSMERIDIAN_GEMINI_API_KEY=\f', []),
-        ('GAUSSMERIDIAN_GEMINI_API_KEY= \t\v\f\r \r\n', []),
-        ('GAUSSMERIDIAN_GEMINI_API_KEY=\r\nA=1', []),
-        ('GAUSSMERIDIAN_GEMINI_API_KEY=\r\r\n', []),
-        ('A=""\nGAUSSMERIDIAN_GEMINI_API_KEY=""\n# GAUSSMERIDIAN_GEMINI_API_KEY=abc', []),
-        ('A="x" # GAUSSMERIDIAN_OPENROUTER_API_KEY=VAL', []),
-        ('XGAUSSMERIDIAN_GEMINI_API_KEY=abc', []),
-        ('GAUSSMERIDIAN_GEMINI_API_KEY_OTHER=abc', []),
-        ('GAUSSMERIDIAN_DB_PASSWORD=abc', []),
-        ('', []),
-    ],
-)
+# Env file texts and the names the guard must report. A paid name counts as set unless its line is exactly an empty
+# assignment; a character that some reader skips, folds away or breaks a line at means neither name can be checked.
+TEXTS: list[tuple[str, list[str]]] = [
+    ('GAUSSMERIDIAN_GEMINI_API_KEY=abc', [GEMINI]),
+    ('export GAUSSMERIDIAN_OPENROUTER_API_KEY="x"\r\n', [OPENROUTER]),
+    ('gaussmeridian_gemini_api_key = y', [GEMINI]),
+    ('set GAUSSMERIDIAN_GEMINI_API_KEY=abc\r\n', [GEMINI]),
+    ('SET GAUSSMERIDIAN_OPENROUTER_API_KEY=abc', [OPENROUTER]),
+    ('set "GAUSSMERIDIAN_GEMINI_API_KEY=abc"', [GEMINI]),
+    ('   export    GAUSSMERIDIAN_GEMINI_API_KEY   =   "abc"   ', [GEMINI]),
+    ("GAUSSMERIDIAN_GEMINI_API_KEY='abc'", [GEMINI]),
+    ('GAUSSMERIDIAN_GEMINI_API_KEY: abc', [GEMINI]),
+    ('\ufeffGAUSSMERIDIAN_GEMINI_API_KEY=abc', [GEMINI]),
+    ('GAUSSMERIDIAN_GEMINI_API_KEY=abc # trailing comment', [GEMINI]),
+    # a quoted value that runs over several lines is a value
+    ('GAUSSMERIDIAN_GEMINI_API_KEY="line one\nline two"\nB=2', [GEMINI]),
+    ("GAUSSMERIDIAN_OPENROUTER_API_KEY='a\r\nb\r\n'", [OPENROUTER]),
+    ('GAUSSMERIDIAN_GEMINI_API_KEY="', [GEMINI]),
+    ('GAUSSMERIDIAN_GEMINI_API_KEY="a\\"b"', [GEMINI]),
+    ('GAUSSMERIDIAN_GEMINI_API_KEY=" "', [GEMINI]),
+    ('GAUSSMERIDIAN_GEMINI_API_KEY=#abc', [GEMINI]),
+    ('GAUSSMERIDIAN_GEMINI_API_KEY=   # looks empty', [GEMINI]),
+    # any line that sets it counts, even if a later one empties it
+    ('GAUSSMERIDIAN_GEMINI_API_KEY=abc\nGAUSSMERIDIAN_GEMINI_API_KEY=\n', [GEMINI]),
+    (f'{OPENROUTER}=a\n{GEMINI}=b\n{OPENROUTER}=c', [OPENROUTER, GEMINI]),
+    # a quoted value is followed by a new statement on the same line (compose)
+    ('GAUSSMERIDIAN_GEMINI_API_KEY=""GAUSSMERIDIAN_GEMINI_API_KEY=VAL', [GEMINI]),
+    ('A="" GAUSSMERIDIAN_OPENROUTER_API_KEY=VAL', [OPENROUTER]),
+    ("A='' GAUSSMERIDIAN_OPENROUTER_API_KEY=VAL", [OPENROUTER]),
+    ('A="x\nline" GAUSSMERIDIAN_OPENROUTER_API_KEY=VAL', [OPENROUTER]),
+    ('A="x" GAUSSMERIDIAN_OPENROUTER_API_KEY=VAL', [OPENROUTER]),
+    ('A="a\\" GAUSSMERIDIAN_OPENROUTER_API_KEY=VAL', [OPENROUTER]),
+    ('A="x\nGAUSSMERIDIAN_OPENROUTER_API_KEY=VAL\n"', [OPENROUTER]),
+    # a line that starts with `#` but holds a quote may close a quoted value; compose then reads what follows
+    ('A="x\n#"GAUSSMERIDIAN_GEMINI_API_KEY=VAL', [GEMINI]),
+    ('A="x\n# a" GAUSSMERIDIAN_GEMINI_API_KEY=VAL', [GEMINI]),
+    ('GAUSSMERIDIAN_GEMINI_API_KEY=${UNSET:-VAL}', [GEMINI]),
+    ('GAUSSMERIDIAN_GEMINI_API_KEY=$X', [GEMINI]),
+    # a whitespace-only value is set for both local-up readers
+    ('GAUSSMERIDIAN_GEMINI_API_KEY= ', [GEMINI]),
+    ('GAUSSMERIDIAN_GEMINI_API_KEY=\t', [GEMINI]),
+    ('GAUSSMERIDIAN_GEMINI_API_KEY=   \r\n', [GEMINI]),
+    # anything but exactly an empty assignment counts, wherever the name is on the line
+    ("GAUSSMERIDIAN_GEMINI_API_KEY=''  # empty", [GEMINI]),
+    ('set "GAUSSMERIDIAN_GEMINI_API_KEY="', [GEMINI]),
+    ('export GAUSSMERIDIAN_GEMINI_API_KEY', [GEMINI]),  # compose takes the value from its own environment
+    ('GAUSSMERIDIAN_GEMINI_API_KEY', [GEMINI]),
+    ('  GAUSSMERIDIAN_GEMINI_API_KEY=', [GEMINI]),
+    ('GAUSSMERIDIAN_GEMINI_API_KEY=""""', [GEMINI]),
+    ('A="x" # GAUSSMERIDIAN_OPENROUTER_API_KEY=VAL', [OPENROUTER]),
+    ('OTHER=1 # GAUSSMERIDIAN_GEMINI_API_KEY=abc', [GEMINI]),
+    ('REM set GAUSSMERIDIAN_GEMINI_API_KEY=abc', [GEMINI]),
+    ('XGAUSSMERIDIAN_GEMINI_API_KEY=abc', [GEMINI]),
+    ('GAUSSMERIDIAN_GEMINI_API_KEY_OTHER=abc', [GEMINI]),
+    # letters that fold to the name's letters (Kelvin sign, long s); compose matches names without case
+    ('GAUSSMERIDIAN_GEMINI_API_\N{KELVIN SIGN}EY=VAL', [GEMINI]),
+    ('GAUS\N{LATIN SMALL LETTER LONG S}MERIDIAN_GEMINI_API_KEY=VAL', [GEMINI]),
+    ('GAUSSMERIDIAN_GEMINI_API_\N{KELVIN SIGN}EY=', []),
+    # a character some reader skips, folds away or breaks a line at: neither name can be checked
+    ('A=1\rGAUSSMERIDIAN_GEMINI_API_KEY=abc\rB=2', BOTH),
+    ('GAUSSMERIDIAN_GEMINI_API_KEY=   \rVAL', BOTH),
+    ('GAUSSMERIDIAN_GEMINI_API_KEY=\rVAL', BOTH),
+    ('GAUSSMERIDIAN_GEMINI_API_KEY=\r"VAL"', BOTH),
+    ('GAUSSMERIDIAN_GEMINI_API_KEY=\r#VAL', BOTH),
+    ('GAUSSMERIDIAN_GEMINI_API_KEY=\rA=1', BOTH),
+    ('GAUSSMERIDIAN_GEMINI_API_KEY\r=VAL', BOTH),
+    ('export\rGAUSSMERIDIAN_GEMINI_API_KEY=VAL', BOTH),
+    ('GAUSSMERIDIAN_GEMINI_API_KEY=\r\r\n', BOTH),
+    ('GAUSSMERIDIAN_GEMINI_API_KEY="\r"', BOTH),
+    ('GAUSSMERIDIAN_GEMINI_API_KEY=\x1c', BOTH),
+    ('GAUSSMERIDIAN_GEMINI_API_KEY=\x1c\n', BOTH),
+    ('GAUSSMERIDIAN_GEMINI_API_KEY=\x85', BOTH),
+    ('GAUSSMERIDIAN_GEMINI_API_KEY=\xa0', BOTH),
+    ('GAUSSMERIDIAN_GEMINI_API_KEY=\N{LINE SEPARATOR}', BOTH),
+    ('GAUSSMERIDIAN_GEMINI_API_KEY=\N{ZERO WIDTH SPACE}', BOTH),
+    ('GAUSSMERIDIAN_GEMINI_API_KEY=\N{ZERO WIDTH NO-BREAK SPACE}', BOTH),
+    ('GAUSSMERIDIAN_GEMINI_API_KEY=\vVAL', BOTH),
+    ('GAUSSMERIDIAN_GEMINI_API_KEY=\v\n', BOTH),
+    ('GAUSSMERIDIAN_GEMINI_API_KEY=\f', BOTH),
+    ('GAUSSMERIDIAN_GEMINI_API_KEY= \t\v\f\r \r\n', BOTH),
+    ('GAUSSMERIDIAN_GEMINI_API\x01_KEY=VAL', BOTH),
+    ('\ufeff\ufeffGAUSSMERIDIAN_GEMINI_API_KEY=', BOTH),
+    ('A=1\n# a note\xa0\nB=2', BOTH),
+    # not keys
+    ('# GAUSSMERIDIAN_GEMINI_API_KEY=abc', []),
+    ('   # export GAUSSMERIDIAN_GEMINI_API_KEY=abc', []),
+    ('\t# GAUSSMERIDIAN_GEMINI_API_KEY=abc', []),
+    ('GAUSSMERIDIAN_GEMINI_API_KEY=', []),
+    ('GAUSSMERIDIAN_GEMINI_API_KEY=""', []),
+    ("GAUSSMERIDIAN_GEMINI_API_KEY=''", []),
+    ('gaussmeridian_gemini_api_key=', []),
+    ('set GAUSSMERIDIAN_GEMINI_API_KEY=', []),
+    ('export GAUSSMERIDIAN_GEMINI_API_KEY=', []),
+    ('EXPORT\tGAUSSMERIDIAN_GEMINI_API_KEY=', []),
+    ('GAUSSMERIDIAN_GEMINI_API_KEY =', []),
+    ('GAUSSMERIDIAN_GEMINI_API_KEY\t=""', []),
+    ('GAUSSMERIDIAN_GEMINI_API_KEY:', []),
+    ('\ufeffGAUSSMERIDIAN_GEMINI_API_KEY=', []),
+    ('GAUSSMERIDIAN_GEMINI_API_KEY=\r\n', []),
+    ('GAUSSMERIDIAN_GEMINI_API_KEY=\r\nA=1', []),
+    ('GAUSSMERIDIAN_GEMINI_API_KEY=\r\n\r\n', []),
+    (f'{GEMINI}=\n{OPENROUTER}=""\n', []),
+    ('A=""\nGAUSSMERIDIAN_GEMINI_API_KEY=""\n# GAUSSMERIDIAN_GEMINI_API_KEY=abc', []),
+    ('A="x\n# GAUSSMERIDIAN_GEMINI_API_KEY=VAL\n"', []),
+    ('GAUSSMER\N{LATIN SMALL LETTER DOTLESS I}DIAN_GEMINI_API_KEY=VAL', []),  # no reader folds it to I
+    ('GAUSSMERIDIAN_DB_PASSWORD=abc', []),
+    ('', []),
+]
+
+
+@pytest.mark.parametrize(('text', 'names'), TEXTS)
 def test_paid_keys_are_found_by_name_only(text: str, names: list[str]) -> None:
     assert paid_keys_in(text) == names
+
+
+HIDING = [
+    *'\x01\x08\x0b\x0c\x0e\x1c\x1f\x7f\x80\x85\x9f\xa0\xad\u034f\u061c\u115f\u1680\u17b4\u180b\u180e\u180f',
+    *'\u2000\u200a\u200b\u200f\u202a\u202e\u202f\u2028\u2029\u205f\u2060\u2064\u206f\u3000\u3164\ufe00\ufe0f',
+    *'\ufeff\uffa0\ufff0\ufff9\U0001bca0\U0001d173\U000e0001\U000e0020\U000e0100\U000e0fff',
+    '\r',
+]
+
+
+@pytest.mark.parametrize('char', HIDING, ids=[f'U+{ord(c):04X}' for c in HIDING])
+def test_a_hiding_character_anywhere_means_neither_name_can_be_checked(char: str) -> None:
+    assert paid_keys_in(f'A=1\n# a note{char}x\nB=2\n') == BOTH
+    assert paid_keys_in(f'{GEMINI}{char}=\n') == BOTH
+
+
+@pytest.mark.parametrize('char', ['\t', '\n', '\u00e9', '\u0131', '\u212a', '\u4e2d', '\U0001f600'])
+def test_other_characters_do_not_stop_the_check(char: str) -> None:
+    assert paid_keys_in(f'A=1{char}\n# a note {char}\n{GEMINI}=\n') == []
+
+
+# The security reviewer's probes (fake values): every one is set for compose or for a local-up reader, except the
+# dotless i, which no reader folds to I.
+REVIEW_FIXTURES = {
+    'a01-name-nbsp-eq': f'{GEMINI}\xa0=FAKEA01\n',
+    'a02-name-nel-eq': f'{GEMINI}\x85=FAKEA02\n',
+    'a03-export-nbsp': f'export\xa0{GEMINI}=FAKEA03\n',
+    'a04-nbsp-emptyq-then-key': f'A=\xa0""{GEMINI}=FAKEA04\n',
+    'a05-nel-emptysq-then-key': f"A=\x85''{GEMINI}=FAKEA05\n",
+    'a06-name-nbsp-colon': f'{GEMINI}\xa0:FAKEA06\n',
+    'a07-nbsp-q-then-key': f'A=\xa0"x"{GEMINI}=FAKEA07\n',
+    'a08-export-nel': f'export\x85{GEMINI}=FAKEA08\n',
+    'a09-space-nbsp-eq': f'{GEMINI} \xa0 =FAKEA09\n',
+    'a10-self-nbsp-emptyq': f'{GEMINI}=\xa0""{GEMINI}=FAKEA10\n',
+    'a11-lead-nbsp': f'\xa0{GEMINI}=FAKEA11\n',
+    'a12-export-sp-nbsp': f'export \xa0{GEMINI}=FAKEA12\n',
+    'a13-tab-emptyq-key': f'A=\t""{GEMINI}=FAKEA13\n',
+    'a14-vt-emptyq-key': f'A=\v""{GEMINI}=FAKEA14\n',
+    'a15-bs-quote': f'A="\\\\"{GEMINI}=FAKEA15"\n',
+    'a16-crlf-emptyq-cr-key': f'A=""\r{GEMINI}=FAKEA16\n',
+    'a17-sq-esc': f"A='x\\'{GEMINI}=FAKEA17\n",
+    'a18-dq-multi-then': f'A="l1\nl2"{GEMINI}=FAKEA18\n',
+    'a19-nbsp-before-colon-sp': f'{GEMINI}\xa0 :FAKEA19\n',
+    'a20-inherit': f'{GEMINI}\n',
+    'b01-kelvin': 'GAUSSMERIDIAN_GEMINI_API_\N{KELVIN SIGN}EY=FAKEB01\n',
+    'b02-longs': 'GAUS\N{LATIN SMALL LETTER LONG S}MERIDIAN_GEMINI_API_KEY=FAKEB02\n',
+    'b03-dotless-i': 'GAUSSMER\N{LATIN SMALL LETTER DOTLESS I}DIAN_GEMINI_API_KEY=FAKEB03\n',
+    'b04-openrouter-nbsp': f'{OPENROUTER}\xa0= FAKEB04\n',
+    'b05-nel-q-then': f'A=\x85"y"{OPENROUTER}=FAKEB05\n',
+    'b06-tab-nbsp-eq': f'{GEMINI}\t\xa0\t=FAKEB06\n',
+    'c01-or-space_g-nbsp': f'GAUSSMERIDIAN_DB_USERNAME=fake\n{OPENROUTER}= \n{GEMINI}\xa0=FAKEC01\n',
+    'c02-or-vt_g-nbsp': f'{OPENROUTER}=\v\n{GEMINI}\xa0=FAKEC02\n',
+    'c03-or-softhyphen-in-quote_g-nbsp': f'A="\n{OPENROUTER}\xad=x\n"\n{GEMINI}\xa0=FAKEC03\n',
+    'c04-or-tab_g-nbsp-emptyq': f'{OPENROUTER}=\t\nA=\xa0""{GEMINI}=FAKEC04\n',
+    '01-cr-after-eq': f'{GEMINI}=\rFAKEVAL01\n',
+    '02-spaces-cr': f'{GEMINI}=   \rFAKEVAL02\n',
+    '03-cr-quoted': f'{GEMINI}=\r"FAKEVAL03"\n',
+    '04-same-line': f'A="" {GEMINI}=FAKEVAL04\n',
+    '05-same-line-self': f'{GEMINI}=""{GEMINI}=FAKEVAL05\n',
+    '06-cr-before-eq': f'{GEMINI}\r=FAKEVAL06\n',
+    '07-cr-hash': f'{GEMINI}=\r#FAKEVAL07\n',
+    '08-after-multiline': f'A="x\nline" {OPENROUTER}=FAKEVAL08\n',
+    '09-export-cr': f'export\r{GEMINI}=FAKEVAL09\n',
+    '10-nbsp-only': f'{GEMINI}=\xa0\n',
+    '11-emspace-only': f'{GEMINI}=\u2003\n',
+    '12-zwsp-only': f'{GEMINI}=\u200b\n',
+    '13-vt': f'{GEMINI}=\vFAKEVAL13\n',
+    '14-vt-only': f'{GEMINI}=\v\n',
+    '15-fs-only': f'{GEMINI}=\x1c\n',
+    '16-nel-only': f'{GEMINI}=\x85\n',
+    '17-ff-only': f'{GEMINI}=\f\n',
+    '18-last-empty': f'{GEMINI}=FAKEVAL18\n{GEMINI}=\n',
+    '19-first-empty': f'{GEMINI}=\n{GEMINI}=FAKEVAL19\n',
+    '20-lower': f'{GEMINI.lower()}=FAKEVAL20\n',
+    '21-u2028': f'{GEMINI}=\u2028FAKEVAL21\n',
+    '22-fs-val': f'{GEMINI}=\x1cFAKEVAL22\n',
+    '23-quoted-cr': f'{GEMINI}="\r"\n',
+    '24-bom-in-value': f'{GEMINI}=\ufeffFAKEVAL24\n',
+    '25-bom': f'\ufeff{GEMINI}=FAKEVAL25\n',
+    '26-interp': f'{GEMINI}=${{UNSET_THING:-FAKEVAL26}}\n',
+    '27-ref': f'X=FAKEVAL27\n{GEMINI}=$X\n',
+}
+NOT_SET_FOR_ANY_READER = {'b03-dotless-i'}
+
+
+@pytest.mark.parametrize('fixture', sorted(REVIEW_FIXTURES))
+def test_every_reviewer_probe_is_refused(tmp_path: Path, fixture: str) -> None:
+    environ, folder = runtime_with(tmp_path)
+    (folder / 'meridian-engine.env').write_bytes(REVIEW_FIXTURES[fixture].encode('utf-8'))
+    message = refusal(environ)
+    if fixture in NOT_SET_FOR_ANY_READER:
+        assert message is None
+        return
+    assert message is not None
+    named = OPENROUTER if OPENROUTER in REVIEW_FIXTURES[fixture] else GEMINI
+    assert named in message
+    assert 'FAKE' not in message
+
+
+def test_a_file_with_two_byte_order_marks_cannot_be_checked(tmp_path: Path) -> None:
+    environ, folder = runtime_with(tmp_path)
+    (folder / 'meridian-engine.env').write_bytes(b'\xef\xbb\xbf\xef\xbb\xbf' + f'{GEMINI}=\n'.encode())
+    message = refusal(environ)
+    assert message is not None
+    assert GEMINI in message
+    (folder / 'meridian-engine.env').write_bytes(b'\xef\xbb\xbf' + f'{GEMINI}=\n'.encode())
+    assert refusal(environ) is None
+
+
+# -- the guard against compose itself ------------------------------------------------------------------------------
+
+# The engine's deploy/compose.yaml hands the keys over the same way
+COMPOSE_FILE = (
+    'services:\n  probe:\n    image: busybox\n    environment:\n'
+    f'      G: ${{{GEMINI}:-}}\n      O: ${{{OPENROUTER}:-}}\n'
+)
+# What docker needs to find its compose plugin. No other variable of this process reaches compose, so a bare
+# `NAME` line cannot pick up a value from here.
+DOCKER_ENV = ('PATH', 'SYSTEMROOT', 'PROGRAMFILES', 'PROGRAMDATA', 'HOME', 'USERPROFILE', 'TEMP', 'TMP')
+Resolver = Callable[[int, str], set[str] | None]
+
+
+def docker_env() -> dict[str, str]:
+    return {name: value for name, value in os.environ.items() if name.upper() in DOCKER_ENV}
+
+
+@pytest.fixture(scope='module')
+def compose_resolves(tmp_path_factory: pytest.TempPathFactory) -> Resolver:
+    """The paid names `docker compose config` resolves to a non-empty value for an env file text, or None when compose
+    rejects the file. It only parses: nothing is pulled, built or started. Only names leave it, never a value."""
+    if shutil.which('docker') is None:
+        pytest.skip('docker is not on PATH')
+    try:
+        version = subprocess.run(['docker', 'compose', 'version'], env=docker_env(), capture_output=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired):
+        pytest.skip('docker compose did not answer')
+    if version.returncode != 0:
+        pytest.skip('docker compose is not available')
+    folder = tmp_path_factory.mktemp('compose')
+    (folder / 'compose.yaml').write_text(COMPOSE_FILE, encoding='utf-8')
+
+    def resolves(index: int, text: str) -> set[str] | None:
+        env_file = folder / f'{index}.env'
+        env_file.write_bytes(text.encode('utf-8'))
+        command = ['docker', 'compose', '-p', 'meridian-guard-probe', '--env-file', str(env_file)]
+        command += ['-f', str(folder / 'compose.yaml'), 'config', '--format', 'json']
+        done = subprocess.run(command, env=docker_env(), cwd=folder, capture_output=True, timeout=120)
+        if done.returncode != 0:
+            return None  # compose refuses the file, so it would hand the engine nothing
+        environment: dict[str, str | None] = json.loads(done.stdout)['services']['probe'].get('environment') or {}
+        return {name for key, name in (('G', GEMINI), ('O', OPENROUTER)) if environment.get(key)}
+
+    return resolves
+
+
+def compose_texts() -> dict[str, str]:
+    texts = {**REVIEW_FIXTURES, **{f'texts[{i}]': text for i, (text, _) in enumerate(TEXTS)}}
+    for char in HIDING:
+        texts[f'U+{ord(char):04X} after the name'] = f'{GEMINI}{char}=FAKE\n'
+        texts[f'U+{ord(char):04X} before the name'] = f'{char}{OPENROUTER}=FAKE\n'
+        texts[f'U+{ord(char):04X} as the value'] = f'{GEMINI}={char}\n'
+    return texts
+
+
+def test_whenever_compose_resolves_a_paid_key_the_guard_refuses_it(compose_resolves: Resolver, tmp_path: Path) -> None:
+    texts = compose_texts()
+    with ThreadPoolExecutor(8) as pool:
+        resolved = dict(zip(texts, pool.map(compose_resolves, range(len(texts)), texts.values()), strict=True))
+    missed: list[str] = []
+    for index, (label, names) in enumerate(resolved.items()):
+        if names:
+            environ, folder = runtime_with(tmp_path / str(index))
+            (folder / 'meridian-engine.env').write_bytes(texts[label].encode('utf-8'))
+            message = refusal(environ) or ''
+            missed += [f'{label}: {name}' for name in sorted(names) if name not in message]
+    assert missed == []
+    # not vacuous: compose read these files, so a docker that resolves nothing cannot pass
+    assert resolved['20-lower'] == {GEMINI}
+    assert resolved['08-after-multiline'] == {OPENROUTER}
+    assert resolved['b03-dotless-i'] == set()
+    assert sum(names is not None for names in resolved.values()) > len(texts) // 2
 
 
 def test_a_value_never_comes_back() -> None:
@@ -527,6 +744,25 @@ def test_system_proxy_entries_for_other_schemes_do_not_matter(tmp_path: Path, mo
     environ, _ = runtime_with(tmp_path)
     monkeypatch.setattr(urllib.request, 'getproxies', lambda: {'ftp': 'http://sys.example:21', 'no': '*'})
     assert refusal(environ) is None
+
+
+@pytest.mark.parametrize(
+    'process', [{}, {'no': 'localhost'}, {'ftp': 'http://sys.example:21'}], ids=['none', 'no_proxy', 'ftp_proxy']
+)
+@pytest.mark.parametrize('scheme', ['http', 'https', 'all'])
+def test_a_registry_proxy_is_refused_whatever_the_process_environment_says(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, process: dict[str, str], scheme: str
+) -> None:
+    # on Windows getproxies() reads the registry only when no *_proxy variable is set, so no_proxy alone hid it
+    environ, _ = runtime_with(tmp_path)
+    monkeypatch.setattr(urllib.request, 'getproxies', lambda: process)
+    registry = {scheme: f'http://u:{SECRET}@reg.example:8080'}
+    monkeypatch.setattr(urllib.request, 'getproxies_registry', lambda: registry, raising=False)
+    message = refusal(environ)
+    assert message is not None
+    assert scheme in message
+    assert SECRET not in message
+    assert 'reg.example' not in message
 
 
 def test_the_default_urls_are_loopback(tmp_path: Path) -> None:

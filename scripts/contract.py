@@ -18,8 +18,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from tests.support.contract_guard import DEFAULT_URLS, refusal, runtime_dir  # noqa: E402
 
-# --frozen: never resolve or sync from an index; --no-env-file: neither a .env file nor UV_ENV_FILE adds variables
-COMMAND = ['uv', 'run', '--frozen', '--no-env-file', 'pytest', '-m', 'not fake_only']
+# --frozen: never resolve or sync; --offline: no index or other network access; --no-env-file: neither a .env file nor
+# UV_ENV_FILE adds variables
+COMMAND = ['uv', 'run', '--frozen', '--offline', '--no-env-file', 'pytest', '-m', 'not fake_only']
 
 
 def ready_endpoint(public_url: str) -> str:
