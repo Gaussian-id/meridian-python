@@ -1,0 +1,1053 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Meridian Public API",
+    "version": "2.0.0-alpha.0"
+  },
+  "paths": {
+    "/health": {
+      "get": {
+        "summary": "`GET /health`: the process is alive.",
+        "operationId": "public_ops_health",
+        "responses": {
+          "200": {
+            "description": "Alive",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Health"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/ready": {
+      "get": {
+        "summary": "`GET /ready`.",
+        "operationId": "public_ops_ready",
+        "responses": {
+          "200": {
+            "description": "Ready",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Ready"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "503": {
+            "description": "A check fails",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Ready"
+                }
+              }
+            }
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/chat/completions": {
+      "post": {
+        "summary": "Serves one chat request.",
+        "operationId": "public_chat_chat_completions",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChatCompletionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "A completion, or (with stream: true) server-sent events of chunks ending in data: [DONE]. Once streaming has begun a failure arrives as one last data: {\"error\":{...}} frame (the error envelope) with no data: [DONE]",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatCompletion"
+                }
+              },
+              "text/event-stream": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChatCompletionChunk"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "ProjectKey": []
+          }
+        ]
+      }
+    },
+    "/v1/models": {
+      "get": {
+        "summary": "Lists the models the caller's key may use.",
+        "operationId": "public_models_list_models",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelList"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "ProjectKey": []
+          }
+        ]
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "AssistantMessage": {
+        "type": "object",
+        "description": "The assistant message in a buffered reply.",
+        "required": [
+          "role",
+          "content"
+        ],
+        "properties": {
+          "content": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Always present; `null` when the reply had no text content."
+          },
+          "reasoning": {
+            "type": "string",
+            "description": "Present only when the reply had reasoning text."
+          },
+          "reasoning_content": {
+            "type": "string",
+            "description": "Present only when the reply had reasoning text."
+          },
+          "refusal": {
+            "type": "string",
+            "description": "Present only when the reply was a refusal."
+          },
+          "role": {
+            "$ref": "#/components/schemas/AssistantRole"
+          },
+          "tool_calls": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ToolCall"
+            },
+            "description": "Present only when the model called tools."
+          }
+        }
+      },
+      "AssistantRole": {
+        "type": "string",
+        "description": "The `role` of a reply's message.",
+        "enum": [
+          "assistant"
+        ]
+      },
+      "ChatChoice": {
+        "type": "object",
+        "description": "The one choice of a buffered reply.",
+        "required": [
+          "index",
+          "message",
+          "finish_reason"
+        ],
+        "properties": {
+          "finish_reason": {
+            "$ref": "#/components/schemas/FinishReasonName"
+          },
+          "index": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "message": {
+            "$ref": "#/components/schemas/AssistantMessage"
+          }
+        }
+      },
+      "ChatCompletion": {
+        "type": "object",
+        "description": "A buffered reply.",
+        "required": [
+          "id",
+          "object",
+          "created",
+          "model",
+          "choices",
+          "usage"
+        ],
+        "properties": {
+          "choices": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ChatChoice"
+            },
+            "description": "Exactly one choice.",
+            "maxItems": 1,
+            "minItems": 1
+          },
+          "created": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Unix seconds when the request started.",
+            "minimum": 0
+          },
+          "id": {
+            "type": "string",
+            "description": "`chatcmpl-<request id>`."
+          },
+          "model": {
+            "type": "string",
+            "description": "The model that served, after any routing and fallback."
+          },
+          "object": {
+            "$ref": "#/components/schemas/CompletionObject"
+          },
+          "usage": {
+            "$ref": "#/components/schemas/Usage",
+            "description": "The token counts; `{}` when the provider reported none."
+          }
+        }
+      },
+      "ChatCompletionChunk": {
+        "type": "object",
+        "description": "One server-sent event of a streamed reply.",
+        "required": [
+          "id",
+          "object",
+          "created",
+          "model",
+          "choices"
+        ],
+        "properties": {
+          "choices": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ChunkChoice"
+            },
+            "description": "One choice, or none on the usage chunk.",
+            "maxItems": 1
+          },
+          "created": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "id": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "object": {
+            "$ref": "#/components/schemas/ChunkObject"
+          },
+          "usage": {
+            "$ref": "#/components/schemas/Usage",
+            "description": "Only on the usage chunk."
+          }
+        }
+      },
+      "ChatCompletionRequest": {
+        "type": "object",
+        "description": "A chat request. Fields the engine does not read are forwarded to the provider unchanged.",
+        "required": [
+          "messages"
+        ],
+        "properties": {
+          "max_completion_tokens": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The output cap; the smaller of this and `max_tokens` applies. At least 1.",
+            "minimum": 1
+          },
+          "max_tokens": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The output cap; the smaller of this and `max_completion_tokens` applies. At least 1.",
+            "minimum": 1
+          },
+          "messages": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ChatMessage"
+            },
+            "description": "At least one message.",
+            "minItems": 1
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A catalogue model id, or `meridian/auto`. Absent or `null` means `meridian/auto` (D-25).",
+            "example": "meridian/auto"
+          },
+          "n": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Must be 1 when present: one choice is served.",
+            "maximum": 1,
+            "minimum": 1
+          },
+          "response_format": {
+            "description": "`{\"type\": \"json_object\"}` or `{\"type\": \"json_schema\", …}` needs JSON output support."
+          },
+          "stop": {
+            "description": "One stop sequence or a list of them."
+          },
+          "stream": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Stream the reply as server-sent events."
+          },
+          "stream_options": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/StreamOptions",
+                "description": "Streaming options; `include_usage: true` ends the stream with a usage chunk (E4)."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "temperature": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Sampling temperature, forwarded."
+          },
+          "tool_choice": {
+            "description": "Tool choice, in the OpenAI shape."
+          },
+          "tools": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/Tool"
+            },
+            "description": "Tools, in the OpenAI shape. A non-empty list needs a model with tool support."
+          },
+          "top_p": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Nucleus sampling, forwarded."
+          },
+          "user": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A stable id for the end user, forwarded to the provider."
+          }
+        },
+        "additionalProperties": true
+      },
+      "ChatMessage": {
+        "type": "object",
+        "description": "One message of the conversation.",
+        "required": [
+          "role"
+        ],
+        "properties": {
+          "content": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/MessageContent",
+                "description": "Text, or a list of parts; absent or `null` on an assistant tool call."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The author's name, forwarded."
+          },
+          "role": {
+            "$ref": "#/components/schemas/MessageRole",
+            "description": "Who wrote the message."
+          },
+          "tool_call_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "On a `tool` message: the id of the tool call it answers."
+          },
+          "tool_calls": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/ToolCall"
+            },
+            "description": "On an `assistant` message: the tool calls the model made."
+          }
+        },
+        "additionalProperties": true
+      },
+      "ChunkChoice": {
+        "type": "object",
+        "description": "The choice of a chunk: a delta, and the finish reason on the last one.",
+        "required": [
+          "index",
+          "delta",
+          "finish_reason"
+        ],
+        "properties": {
+          "delta": {
+            "$ref": "#/components/schemas/ChunkDelta",
+            "description": "The provider delta, forwarded; `{}` at the finish."
+          },
+          "finish_reason": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/FinishReasonName",
+                "description": "`null` until the last chunk."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "index": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        }
+      },
+      "ChunkDelta": {
+        "type": "object",
+        "description": "The provider's delta of a streamed reply, forwarded as it came. Every key is optional; keys\nnot listed here pass through.",
+        "properties": {
+          "content": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A piece of the text; `null` on a delta that carries only tool calls."
+          },
+          "reasoning": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A piece of the reasoning text."
+          },
+          "reasoning_content": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A piece of the reasoning text, under the other common name."
+          },
+          "refusal": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A piece of a refusal."
+          },
+          "role": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/AssistantRole",
+                "description": "Present on the first delta of some providers."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "tool_calls": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/ToolCallDelta"
+            },
+            "description": "Pieces of tool calls; a piece belongs to the call its `index` names."
+          }
+        },
+        "additionalProperties": true
+      },
+      "ChunkObject": {
+        "type": "string",
+        "description": "The `object` of a streamed chunk.",
+        "enum": [
+          "chat.completion.chunk"
+        ]
+      },
+      "CompletionObject": {
+        "type": "string",
+        "description": "The `object` of a buffered reply.",
+        "enum": [
+          "chat.completion"
+        ]
+      },
+      "CompletionTokensDetails": {
+        "type": "object",
+        "description": "Completion detail counts.",
+        "required": [
+          "reasoning_tokens"
+        ],
+        "properties": {
+          "reasoning_tokens": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "ContentPart": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "A text part.",
+            "required": [
+              "text",
+              "type"
+            ],
+            "properties": {
+              "text": {
+                "type": "string",
+                "description": "The text."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "text"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "An image part.",
+            "required": [
+              "image_url",
+              "type"
+            ],
+            "properties": {
+              "image_url": {
+                "$ref": "#/components/schemas/ImageUrl",
+                "description": "The image."
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "image_url"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "One part of a message content. An `image_url` part needs a model with vision support."
+      },
+      "ErrorBody": {
+        "type": "object",
+        "required": [
+          "message",
+          "type",
+          "code",
+          "request_id"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "enum": [
+              "invalid_request",
+              "invalid_api_key",
+              "key_revoked",
+              "key_expired",
+              "project_unavailable",
+              "organisation_unavailable",
+              "model_not_allowed",
+              "byok_required",
+              "project_host_mismatch",
+              "model_not_found",
+              "route_not_found",
+              "method_not_allowed",
+              "capability_unsupported",
+              "body_too_large",
+              "rate_limited",
+              "insufficient_credit",
+              "hard_limit_reached",
+              "entitlement_missing",
+              "idempotency_conflict",
+              "upstream_unavailable",
+              "upstream_error",
+              "deadline_exceeded",
+              "service_unavailable",
+              "internal",
+              "invalid_token",
+              "permission_denied",
+              "not_found",
+              "conflict"
+            ]
+          },
+          "message": {
+            "type": "string"
+          },
+          "request_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "api_error",
+              "authentication_error",
+              "invalid_request_error",
+              "permission_error",
+              "rate_limit_error"
+            ]
+          }
+        }
+      },
+      "ErrorEnvelope": {
+        "type": "object",
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "$ref": "#/components/schemas/ErrorBody"
+          }
+        }
+      },
+      "FinishReasonName": {
+        "type": "string",
+        "description": "The four finish reasons.",
+        "enum": [
+          "stop",
+          "length",
+          "tool_calls",
+          "content_filter"
+        ]
+      },
+      "Health": {
+        "type": "object",
+        "description": "`GET /health`.",
+        "required": [
+          "status"
+        ],
+        "properties": {
+          "status": {
+            "type": "string"
+          }
+        }
+      },
+      "ImageUrl": {
+        "type": "object",
+        "description": "The image of an `image_url` part.",
+        "required": [
+          "url"
+        ],
+        "properties": {
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`auto`, `low` or `high`; forwarded."
+          },
+          "url": {
+            "type": "string",
+            "description": "An https URL or a data URL."
+          }
+        }
+      },
+      "ListObject": {
+        "type": "string",
+        "description": "The `object` of the model list.",
+        "enum": [
+          "list"
+        ]
+      },
+      "MessageContent": {
+        "oneOf": [
+          {
+            "type": "string",
+            "description": "Plain text."
+          },
+          {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ContentPart"
+            },
+            "description": "Text and image parts, in order."
+          }
+        ],
+        "description": "A message content: plain text, or a list of typed parts."
+      },
+      "MessageRole": {
+        "type": "string",
+        "description": "The role of a message. The engine forwards the role as sent and does not check it; these are\nthe roles providers accept.",
+        "enum": [
+          "system",
+          "developer",
+          "user",
+          "assistant",
+          "tool"
+        ]
+      },
+      "ModelList": {
+        "type": "object",
+        "description": "`GET /v1/models`.",
+        "required": [
+          "object",
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ModelObject"
+            }
+          },
+          "object": {
+            "$ref": "#/components/schemas/ListObject"
+          }
+        }
+      },
+      "ModelObject": {
+        "type": "object",
+        "description": "One model the key may use; `meridian/auto` first when there is something to route among.",
+        "required": [
+          "id",
+          "object",
+          "owned_by"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "object": {
+            "$ref": "#/components/schemas/ModelObjectKind"
+          },
+          "owned_by": {
+            "type": "string",
+            "description": "The provider, or `meridian` for `meridian/auto`."
+          }
+        }
+      },
+      "ModelObjectKind": {
+        "type": "string",
+        "description": "The `object` of one model.",
+        "enum": [
+          "model"
+        ]
+      },
+      "PromptTokensDetails": {
+        "type": "object",
+        "description": "Prompt detail counts; each is present only when known.",
+        "properties": {
+          "cache_write_tokens": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "cached_tokens": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "Ready": {
+        "type": "object",
+        "description": "`GET /ready`: 200 with `ready: true`, or 503 with `ready: false` and the failing checks.",
+        "required": [
+          "ready"
+        ],
+        "properties": {
+          "failing": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The failing checks (`database`, `catalogue`, `limiter`); absent when ready."
+          },
+          "ready": {
+            "type": "boolean"
+          }
+        }
+      },
+      "StreamOptions": {
+        "type": "object",
+        "description": "Streaming options.",
+        "properties": {
+          "include_usage": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "End the stream with a usage chunk (`choices: []`) before `[DONE]`."
+          }
+        }
+      },
+      "Tool": {
+        "type": "object",
+        "description": "A tool the model may call.",
+        "required": [
+          "type",
+          "function"
+        ],
+        "properties": {
+          "function": {
+            "$ref": "#/components/schemas/ToolFunction",
+            "description": "The function."
+          },
+          "type": {
+            "$ref": "#/components/schemas/ToolKind",
+            "description": "The only kind of tool."
+          }
+        }
+      },
+      "ToolCall": {
+        "type": "object",
+        "description": "One merged tool call.",
+        "required": [
+          "id",
+          "type",
+          "function"
+        ],
+        "properties": {
+          "function": {
+            "$ref": "#/components/schemas/ToolCallFunction"
+          },
+          "id": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          }
+        }
+      },
+      "ToolCallDelta": {
+        "type": "object",
+        "description": "One piece of a streamed tool call.",
+        "required": [
+          "index"
+        ],
+        "properties": {
+          "function": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ToolCallDeltaFunction",
+                "description": "The function name and a piece of its arguments."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The call id, on its first piece."
+          },
+          "index": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The call this piece belongs to.",
+            "minimum": 0
+          },
+          "type": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`function`, on the first piece."
+          }
+        },
+        "additionalProperties": true
+      },
+      "ToolCallDeltaFunction": {
+        "type": "object",
+        "description": "The function of a tool-call piece.",
+        "properties": {
+          "arguments": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A piece of the JSON arguments; the pieces join into the whole."
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The function name, on the first piece."
+          }
+        },
+        "additionalProperties": true
+      },
+      "ToolCallFunction": {
+        "type": "object",
+        "description": "A tool call function.",
+        "required": [
+          "name",
+          "arguments"
+        ],
+        "properties": {
+          "arguments": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "ToolFunction": {
+        "type": "object",
+        "description": "The function of a tool.",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What the function does."
+          },
+          "name": {
+            "type": "string",
+            "description": "The function name."
+          },
+          "parameters": {
+            "type": "object",
+            "description": "A JSON Schema object for the arguments; its content is not checked."
+          }
+        }
+      },
+      "ToolKind": {
+        "type": "string",
+        "description": "The `type` of a tool.",
+        "enum": [
+          "function"
+        ]
+      },
+      "Usage": {
+        "type": "object",
+        "description": "Token counts in the OpenAI names. A count the provider did not report is absent;\n`total_tokens` only when input and output are both known. Never a price or cost (D-27).",
+        "properties": {
+          "completion_tokens": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "completion_tokens_details": {
+            "$ref": "#/components/schemas/CompletionTokensDetails"
+          },
+          "prompt_tokens": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "prompt_tokens_details": {
+            "$ref": "#/components/schemas/PromptTokensDetails"
+          },
+          "total_tokens": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      }
+    },
+    "responses": {
+      "Error": {
+        "description": "The error envelope; the request id is also in `x-request-id`",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorEnvelope"
+            }
+          }
+        }
+      }
+    },
+    "securitySchemes": {
+      "ProjectKey": {
+        "type": "http",
+        "scheme": "bearer"
+      }
+    }
+  }
+}

@@ -1,0 +1,4277 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Meridian Admin API",
+    "version": "2.0.0-alpha.0"
+  },
+  "paths": {
+    "/openapi.json": {
+      "get": {
+        "summary": "`GET /openapi.json`: the admin document, generated from this same router.",
+        "operationId": "admin_openapi_document",
+        "responses": {
+          "200": {
+            "description": "Admin OpenAPI document",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          }
+        },
+        "security": []
+      }
+    },
+    "/v1/admin/audit": {
+      "get": {
+        "summary": "`GET /v1/admin/audit?limit=`: the newest audit events, newest first.",
+        "operationId": "platform_audit",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuditPage"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/admin/integrators": {
+      "get": {
+        "operationId": "integrators_list",
+        "responses": {
+          "200": {
+            "description": "Credential metadata",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/IntegratorBody"
+                  }
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "post": {
+        "operationId": "integrators_issue",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IssueIntegrator"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Credential shown once",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IssuedIntegrator"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/admin/integrators/{id}": {
+      "delete": {
+        "operationId": "integrators_revoke",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "integrator identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Revoked"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/admin/me": {
+      "get": {
+        "summary": "`GET /v1/admin/me`: `{superadmin: true}`; anyone else never gets here.",
+        "operationId": "platform_me",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SuperadminBody"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/admin/orgs": {
+      "get": {
+        "summary": "`GET /v1/admin/orgs?window=`: the oldest organisations, with an incomplete flag at the bound.",
+        "operationId": "platform_orgs",
+        "parameters": [
+          {
+            "name": "window",
+            "in": "query",
+            "description": "window",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PlatformOrgsPage"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/admin/orgs/{id}": {
+      "get": {
+        "summary": "`GET /v1/admin/orgs/{id}?window=`: one organisation and its projects.",
+        "operationId": "platform_org",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "id identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "window",
+            "in": "query",
+            "description": "window",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PlatformOrgDetail"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/admin/orgs/{id}/lock": {
+      "post": {
+        "summary": "`POST /v1/admin/orgs/{id}/lock?minutes=&reason=`.",
+        "operationId": "lifecycle_lock_org",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "id identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "minutes",
+            "in": "query",
+            "description": "minutes (required)",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "reason",
+            "in": "query",
+            "description": "reason",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ControlBody"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/admin/orgs/{id}/reactivate": {
+      "post": {
+        "summary": "`POST /v1/admin/orgs/{id}/reactivate?reason=`.",
+        "operationId": "lifecycle_reactivate_org",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "id identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "reason",
+            "in": "query",
+            "description": "reason",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ControlBody"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/admin/orgs/{id}/suspend": {
+      "post": {
+        "summary": "`POST /v1/admin/orgs/{id}/suspend?reason=`.",
+        "operationId": "lifecycle_suspend_org",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "id identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "reason",
+            "in": "query",
+            "description": "reason",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ControlBody"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/admin/projects": {
+      "get": {
+        "summary": "`GET /v1/admin/projects?window=`: the oldest projects, with an incomplete flag at the bound.",
+        "operationId": "platform_projects",
+        "parameters": [
+          {
+            "name": "window",
+            "in": "query",
+            "description": "window",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PlatformProjectsPage"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/admin/projects/{id}": {
+      "get": {
+        "summary": "`GET /v1/admin/projects/{id}?window=`: one project.",
+        "operationId": "platform_project",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "id identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "window",
+            "in": "query",
+            "description": "window",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PlatformProjectDetail"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/admin/projects/{id}/lock": {
+      "post": {
+        "summary": "`POST /v1/admin/projects/{id}/lock?minutes=&reason=`.",
+        "operationId": "lifecycle_lock_project",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "id identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "minutes",
+            "in": "query",
+            "description": "minutes (required)",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "reason",
+            "in": "query",
+            "description": "reason",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ControlBody"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/admin/projects/{id}/reactivate": {
+      "post": {
+        "summary": "`POST /v1/admin/projects/{id}/reactivate?reason=`.",
+        "operationId": "lifecycle_reactivate_project",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "id identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "reason",
+            "in": "query",
+            "description": "reason",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ControlBody"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/admin/projects/{id}/suspend": {
+      "post": {
+        "summary": "`POST /v1/admin/projects/{id}/suspend?reason=`.",
+        "operationId": "lifecycle_suspend_project",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "id identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "reason",
+            "in": "query",
+            "description": "reason",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ControlBody"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/admin/usage-outbox/parked": {
+      "get": {
+        "summary": "`GET /v1/admin/usage-outbox/parked`: metadata for parked exports, oldest first.",
+        "operationId": "platform_parked_usage",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ParkedUsagePage"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/admin/usage-outbox/requeue": {
+      "post": {
+        "summary": "`POST /v1/admin/usage-outbox/requeue`: retry all parked exports.",
+        "operationId": "platform_requeue_all_parked_usage",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RequeuedBody"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/admin/usage-outbox/{id}/requeue": {
+      "post": {
+        "summary": "`POST /v1/admin/usage-outbox/{id}/requeue`: retry one parked export.",
+        "operationId": "platform_requeue_parked_usage",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Usage event id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RequeuedBody"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/admin/users": {
+      "get": {
+        "summary": "`GET /v1/admin/users?limit=&start=&q=`: a page of users and the total that match.",
+        "operationId": "platform_users",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "limit",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "start",
+            "in": "query",
+            "description": "start",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "description": "q",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PlatformUsersPage"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/admin/users/{id}/reactivate": {
+      "post": {
+        "summary": "`POST /v1/admin/users/{id}/reactivate?reason=`.",
+        "operationId": "lifecycle_reactivate_user",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "id identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "reason",
+            "in": "query",
+            "description": "reason",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ControlBody"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/admin/users/{id}/suspend": {
+      "post": {
+        "summary": "`POST /v1/admin/users/{id}/suspend?reason=`.",
+        "operationId": "lifecycle_suspend_user",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "id identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "reason",
+            "in": "query",
+            "description": "reason",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ControlBody"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/analytics/usage": {
+      "get": {
+        "summary": "`GET /v1/analytics/usage?project_id=&from=&to=`.",
+        "operationId": "usage_usage",
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "query",
+            "description": "project_id (required)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "description": "from",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "description": "to",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UsageReport"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "AdminBearer": []
+          },
+          {
+            "IntegratorKey": []
+          }
+        ]
+      }
+    },
+    "/v1/auth/me": {
+      "get": {
+        "summary": "`GET /v1/auth/me`: the signed-in user, and whether they are a platform administrator.",
+        "operationId": "auth_me",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MeBody"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/catalogue": {
+      "get": {
+        "summary": "`GET /v1/catalogue`: the active supplier catalogue and version.",
+        "operationId": "supplier_catalogue_active",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SupplierCatalogueResponse"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "AdminBearer": []
+          },
+          {
+            "IntegratorKey": []
+          }
+        ]
+      }
+    },
+    "/v1/catalogue/{version}": {
+      "get": {
+        "summary": "`GET /v1/catalogue/{version}`: an immutable supplier catalogue version.",
+        "operationId": "supplier_catalogue_version",
+        "parameters": [
+          {
+            "name": "version",
+            "in": "path",
+            "description": "catalogue version",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SupplierCatalogueResponse"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "AdminBearer": []
+          },
+          {
+            "IntegratorKey": []
+          }
+        ]
+      }
+    },
+    "/v1/logs": {
+      "get": {
+        "summary": "`GET /v1/logs?project_id=&page_size=&cursor=`.",
+        "operationId": "usage_logs",
+        "parameters": [
+          {
+            "name": "project_id",
+            "in": "query",
+            "description": "project_id (required)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "page_size",
+            "in": "query",
+            "description": "page_size",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "description": "cursor",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LogPage"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "AdminBearer": []
+          },
+          {
+            "IntegratorKey": []
+          }
+        ]
+      }
+    },
+    "/v1/models": {
+      "get": {
+        "summary": "`GET /v1/models`: the active catalogue, for any signed-in user.",
+        "operationId": "models_catalogue",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/CatalogueModelBody"
+                  }
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "AdminBearer": []
+          },
+          {
+            "IntegratorKey": []
+          }
+        ]
+      }
+    },
+    "/v1/models/{model}": {
+      "get": {
+        "summary": "`GET /v1/models/{model}`: one model of the active catalogue.",
+        "operationId": "models_one",
+        "parameters": [
+          {
+            "name": "model",
+            "in": "path",
+            "description": "model identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CatalogueModelBody"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "AdminBearer": []
+          },
+          {
+            "IntegratorKey": []
+          }
+        ]
+      }
+    },
+    "/v1/onboarding/advance": {
+      "post": {
+        "summary": "`POST /v1/onboarding/advance`: one step forward.",
+        "operationId": "onboarding_advance",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AdvanceOnboarding"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OnboardingBody"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/onboarding/complete": {
+      "post": {
+        "summary": "`POST /v1/onboarding/complete`: completes onboarding; completing again changes nothing.",
+        "operationId": "onboarding_complete",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OnboardingBody"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/onboarding/state": {
+      "get": {
+        "summary": "`GET /v1/onboarding/state`.",
+        "operationId": "onboarding_state",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OnboardingBody"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/orgs": {
+      "get": {
+        "summary": "`GET /v1/orgs`: human memberships or the integrator's own organisations.",
+        "operationId": "orgs_list",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/OrganisationBody"
+                  }
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "AdminBearer": []
+          },
+          {
+            "IntegratorKey": []
+          }
+        ]
+      },
+      "post": {
+        "summary": "`POST /v1/orgs`: a new organisation (201), or integrator reference replay (200).",
+        "operationId": "orgs_create",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateOrganisation"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "External reference replay",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrganisationBody"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrganisationBody"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "AdminBearer": []
+          },
+          {
+            "IntegratorKey": []
+          }
+        ]
+      }
+    },
+    "/v1/orgs/by-reference/{reference}": {
+      "get": {
+        "operationId": "orgs_by_reference",
+        "parameters": [
+          {
+            "name": "reference",
+            "in": "path",
+            "description": "external reference",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrganisationBody"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "AdminBearer": []
+          },
+          {
+            "IntegratorKey": []
+          }
+        ]
+      }
+    },
+    "/v1/orgs/{org}": {
+      "get": {
+        "summary": "`GET /v1/orgs/{org}`.",
+        "operationId": "orgs_get",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "description": "org identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrganisationBody"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "AdminBearer": []
+          },
+          {
+            "IntegratorKey": []
+          }
+        ]
+      },
+      "delete": {
+        "summary": "`DELETE /v1/orgs/{org}`: deletes it with everything in it (owners; 204).",
+        "operationId": "orgs_delete",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "description": "org identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No content"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "patch": {
+        "summary": "`PATCH /v1/orgs/{org}`: renames it (owners).",
+        "operationId": "orgs_rename",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "description": "org identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RenameOrganisation"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrganisationBody"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/orgs/{org}/members": {
+      "get": {
+        "summary": "`GET /v1/orgs/{org}/members`: members and invitations, oldest first.",
+        "operationId": "members_list",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "description": "org identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/MemberBody"
+                  }
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "post": {
+        "summary": "`POST /v1/orgs/{org}/members`: an invitation (201).",
+        "operationId": "members_invite",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "description": "org identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/InviteMember"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemberBody"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/orgs/{org}/members/{member}": {
+      "delete": {
+        "summary": "`DELETE /v1/orgs/{org}/members/{member}`: the member removed, or the invitation withdrawn\n(204).",
+        "operationId": "members_remove",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "description": "org identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "member",
+            "in": "path",
+            "description": "member identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No content"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      },
+      "patch": {
+        "summary": "`PATCH /v1/orgs/{org}/members/{member}`: another role.",
+        "operationId": "members_change_role",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "description": "org identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "member",
+            "in": "path",
+            "description": "member identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ChangeRole"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemberBody"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    },
+    "/v1/orgs/{org}/projects": {
+      "get": {
+        "summary": "`GET /v1/orgs/{org}/projects`: the organisation's projects, oldest first.",
+        "operationId": "projects_list",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "description": "org identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ProjectBody"
+                  }
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "AdminBearer": []
+          },
+          {
+            "IntegratorKey": []
+          }
+        ]
+      },
+      "post": {
+        "summary": "`POST /v1/orgs/{org}/projects`: a new active project (owners and admins; 201).",
+        "operationId": "projects_create",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "description": "org identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateProject"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectBody"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "AdminBearer": []
+          },
+          {
+            "IntegratorKey": []
+          }
+        ]
+      }
+    },
+    "/v1/orgs/{org}/projects/{project}": {
+      "get": {
+        "summary": "`GET /v1/orgs/{org}/projects/{project}`.",
+        "operationId": "projects_get",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "description": "org identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project",
+            "in": "path",
+            "description": "project identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectBody"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "AdminBearer": []
+          },
+          {
+            "IntegratorKey": []
+          }
+        ]
+      },
+      "delete": {
+        "summary": "`DELETE /v1/orgs/{org}/projects/{project}`: deletes it with its keys (owners and admins; 204).",
+        "operationId": "projects_delete",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "description": "org identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project",
+            "in": "path",
+            "description": "project identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No content"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "AdminBearer": []
+          },
+          {
+            "IntegratorKey": []
+          }
+        ]
+      },
+      "patch": {
+        "summary": "`PATCH /v1/orgs/{org}/projects/{project}`: renames it (owners and admins).",
+        "operationId": "projects_rename",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "description": "org identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project",
+            "in": "path",
+            "description": "project identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateProject"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProjectBody"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "AdminBearer": []
+          },
+          {
+            "IntegratorKey": []
+          }
+        ]
+      }
+    },
+    "/v1/orgs/{org}/projects/{project}/keys": {
+      "get": {
+        "summary": "`GET …/keys`: the project's keys, oldest first, revoked ones included.",
+        "operationId": "keys_list",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "description": "org identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project",
+            "in": "path",
+            "description": "project identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/KeyBody"
+                  }
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "AdminBearer": []
+          },
+          {
+            "IntegratorKey": []
+          }
+        ]
+      },
+      "post": {
+        "summary": "`POST …/keys`: a new key (201). The secret is in this response only.",
+        "operationId": "keys_issue",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "description": "org identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project",
+            "in": "path",
+            "description": "project identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IssueKey"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Created",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IssuedKey"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "AdminBearer": []
+          },
+          {
+            "IntegratorKey": []
+          }
+        ]
+      }
+    },
+    "/v1/orgs/{org}/projects/{project}/keys/{key}": {
+      "delete": {
+        "summary": "`DELETE …/keys/{key}`: revokes the key (204). Revoking a key already revoked is a 204.",
+        "operationId": "keys_revoke",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "description": "org identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project",
+            "in": "path",
+            "description": "project identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "key",
+            "in": "path",
+            "description": "key identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No content"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "AdminBearer": []
+          },
+          {
+            "IntegratorKey": []
+          }
+        ]
+      }
+    },
+    "/v1/orgs/{org}/projects/{project}/models": {
+      "get": {
+        "summary": "`GET …/models`: the models the project's keys may use.",
+        "operationId": "models_allowlist",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "description": "org identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project",
+            "in": "path",
+            "description": "project identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelAllowlist"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "AdminBearer": []
+          },
+          {
+            "IntegratorKey": []
+          }
+        ]
+      },
+      "put": {
+        "summary": "`PUT …/models`: replaces the allowlist (owners and admins).",
+        "operationId": "models_set_allowlist",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "description": "org identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "project",
+            "in": "path",
+            "description": "project identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ModelAllowlist"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelAllowlist"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "AdminBearer": []
+          },
+          {
+            "IntegratorKey": []
+          }
+        ]
+      }
+    },
+    "/v1/orgs/{org}/provider-credentials": {
+      "get": {
+        "summary": "List only provider, hint, timestamps and policy.",
+        "operationId": "byok_list",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "description": "org identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Credential metadata",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/CredentialMetadata"
+                  }
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "AdminBearer": []
+          },
+          {
+            "IntegratorKey": []
+          }
+        ]
+      }
+    },
+    "/v1/orgs/{org}/provider-credentials/{provider}": {
+      "put": {
+        "summary": "Replace a credential; plaintext exists only in this request and in encryption memory.",
+        "operationId": "byok_set",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "description": "org identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "provider",
+            "in": "path",
+            "description": "provider identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SetCredential"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Credential metadata",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CredentialMetadata"
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "AdminBearer": []
+          },
+          {
+            "IntegratorKey": []
+          }
+        ]
+      },
+      "delete": {
+        "summary": "Remove a credential, returning to pooled service or required-policy refusal.",
+        "operationId": "byok_delete",
+        "parameters": [
+          {
+            "name": "org",
+            "in": "path",
+            "description": "org identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "provider",
+            "in": "path",
+            "description": "provider identifier",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No content"
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [
+          {
+            "AdminBearer": []
+          },
+          {
+            "IntegratorKey": []
+          }
+        ]
+      }
+    },
+    "/v1/roles": {
+      "get": {
+        "summary": "`GET /v1/roles`: the three roles, each with the permissions the decision table gives it.",
+        "operationId": "members_roles",
+        "responses": {
+          "200": {
+            "description": "Success",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/RoleBody"
+                  }
+                }
+              }
+            }
+          },
+          "4XX": {
+            "$ref": "#/components/responses/Error"
+          },
+          "5XX": {
+            "$ref": "#/components/responses/Error"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "AccountStatusName": {
+        "type": "string",
+        "description": "A user's status on the wire.",
+        "enum": [
+          "active",
+          "suspended"
+        ]
+      },
+      "AdvanceOnboarding": {
+        "type": "object",
+        "description": "`POST /v1/onboarding/advance`: the step the caller expects to leave. Other fields the console\nsends are ignored.",
+        "required": [
+          "from"
+        ],
+        "properties": {
+          "from": {
+            "type": "string",
+            "description": "The step the caller expects to leave: `welcome`, `survey`, `profile`, `create_org`,\n`create_project`, `api_key` or `finish`."
+          }
+        }
+      },
+      "AuditEventBody": {
+        "type": "object",
+        "description": "An audit event on the wire.",
+        "required": [
+          "id",
+          "actor_email",
+          "actor_kind",
+          "actor_id",
+          "action",
+          "target_type",
+          "target_id",
+          "reason",
+          "created_at"
+        ],
+        "properties": {
+          "action": {
+            "type": "string",
+            "description": "The action, such as `organisation.create`."
+          },
+          "actor_email": {
+            "type": "string"
+          },
+          "actor_id": {
+            "type": "string"
+          },
+          "actor_kind": {
+            "type": "string",
+            "description": "What kind of principal acted."
+          },
+          "created_at": {
+            "type": "string",
+            "description": "RFC 3339, UTC."
+          },
+          "id": {
+            "type": "string"
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The operator's note; `null` when none was given."
+          },
+          "target_id": {
+            "type": "string"
+          },
+          "target_type": {
+            "type": "string"
+          }
+        }
+      },
+      "AuditPage": {
+        "type": "object",
+        "description": "The newest audit events, newest first.",
+        "required": [
+          "actions"
+        ],
+        "properties": {
+          "actions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AuditEventBody"
+            }
+          }
+        }
+      },
+      "CatalogueModelBody": {
+        "type": "object",
+        "description": "A model of the active catalogue, as a customer sees it.",
+        "required": [
+          "id",
+          "provider",
+          "capabilities",
+          "context_tokens",
+          "max_output_tokens"
+        ],
+        "properties": {
+          "capabilities": {
+            "$ref": "#/components/schemas/ModelCapabilities"
+          },
+          "context_tokens": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The context window, in tokens.",
+            "minimum": 0
+          },
+          "id": {
+            "type": "string"
+          },
+          "max_output_tokens": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The longest reply, in tokens.",
+            "minimum": 0
+          },
+          "provider": {
+            "type": "string"
+          }
+        }
+      },
+      "ChangeRole": {
+        "type": "object",
+        "description": "`PATCH /v1/orgs/{org}/members/{member}`: the new role.",
+        "required": [
+          "role_id"
+        ],
+        "properties": {
+          "role_id": {
+            "type": "string",
+            "description": "The role to give: `owner`, `admin` or `developer`."
+          }
+        }
+      },
+      "ControlBody": {
+        "type": "object",
+        "description": "A control action's answer.",
+        "required": [
+          "target_type",
+          "target_id",
+          "action",
+          "status",
+          "locked_until"
+        ],
+        "properties": {
+          "action": {
+            "type": "string",
+            "description": "What was done: `lock`, `suspend` or `reactivate`."
+          },
+          "locked_until": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "RFC 3339, UTC; `null` unless the target is locked."
+          },
+          "status": {
+            "type": "string",
+            "description": "The status now: `active`, `locked` or `suspended`."
+          },
+          "target_id": {
+            "type": "string",
+            "description": "The record's id."
+          },
+          "target_type": {
+            "type": "string",
+            "description": "What was changed: `organisation`, `project` or `user`."
+          }
+        }
+      },
+      "CreateOrganisation": {
+        "type": "object",
+        "description": "`POST /v1/orgs`: a name, optional slug and integrator-only external reference.",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "external_reference": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "An integrator's own id for this organisation. Integrators only; a repeat returns the\nexisting organisation (200)."
+          },
+          "name": {
+            "type": "string",
+            "description": "The organisation's name."
+          },
+          "slug": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The organisation's slug; derived from the name when absent."
+          }
+        }
+      },
+      "CreateProject": {
+        "type": "object",
+        "description": "`POST /v1/orgs/{org}/projects`: the name.",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "The project's name."
+          }
+        }
+      },
+      "CredentialMetadata": {
+        "type": "object",
+        "required": [
+          "provider",
+          "hint",
+          "created_at",
+          "last_used_at",
+          "policy"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string"
+          },
+          "hint": {
+            "type": "string",
+            "maxLength": 4,
+            "minLength": 4,
+            "pattern": "^[!-~]{4}$"
+          },
+          "last_used_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "policy": {
+            "$ref": "#/components/schemas/CredentialPolicy"
+          },
+          "provider": {
+            "type": "string"
+          }
+        }
+      },
+      "CredentialPolicy": {
+        "type": "string",
+        "enum": [
+          "prefer",
+          "require"
+        ]
+      },
+      "ErrorBody": {
+        "type": "object",
+        "required": [
+          "message",
+          "type",
+          "code",
+          "request_id"
+        ],
+        "properties": {
+          "code": {
+            "type": "string",
+            "enum": [
+              "invalid_request",
+              "invalid_api_key",
+              "key_revoked",
+              "key_expired",
+              "project_unavailable",
+              "organisation_unavailable",
+              "model_not_allowed",
+              "byok_required",
+              "project_host_mismatch",
+              "model_not_found",
+              "route_not_found",
+              "method_not_allowed",
+              "capability_unsupported",
+              "body_too_large",
+              "rate_limited",
+              "insufficient_credit",
+              "hard_limit_reached",
+              "entitlement_missing",
+              "idempotency_conflict",
+              "upstream_unavailable",
+              "upstream_error",
+              "deadline_exceeded",
+              "service_unavailable",
+              "internal",
+              "invalid_token",
+              "permission_denied",
+              "not_found",
+              "conflict"
+            ]
+          },
+          "message": {
+            "type": "string"
+          },
+          "request_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "api_error",
+              "authentication_error",
+              "invalid_request_error",
+              "permission_error",
+              "rate_limit_error"
+            ]
+          }
+        }
+      },
+      "ErrorEnvelope": {
+        "type": "object",
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "$ref": "#/components/schemas/ErrorBody"
+          }
+        }
+      },
+      "IntegratorBody": {
+        "type": "object",
+        "description": "An integrator's credential metadata on the wire; never the secret.",
+        "required": [
+          "id",
+          "name",
+          "prefix",
+          "created_at",
+          "expires_at",
+          "last_used_at",
+          "active"
+        ],
+        "properties": {
+          "active": {
+            "type": "boolean",
+            "description": "Whether the credential is neither revoked nor expired."
+          },
+          "created_at": {
+            "type": "string",
+            "description": "RFC 3339, UTC."
+          },
+          "expires_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "RFC 3339, UTC; `null` when the credential does not expire."
+          },
+          "id": {
+            "type": "string"
+          },
+          "last_used_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "RFC 3339, UTC; `null` until the credential is first used."
+          },
+          "name": {
+            "type": "string"
+          },
+          "prefix": {
+            "type": "string",
+            "description": "The first characters of the credential, for recognising it."
+          }
+        }
+      },
+      "InviteMember": {
+        "type": "object",
+        "description": "`POST /v1/orgs/{org}/members`: who to invite, and as what.",
+        "required": [
+          "email",
+          "role_id"
+        ],
+        "properties": {
+          "email": {
+            "type": "string",
+            "description": "The address to invite."
+          },
+          "role_id": {
+            "type": "string",
+            "description": "The role to give: `owner`, `admin` or `developer`."
+          }
+        }
+      },
+      "IssueIntegrator": {
+        "type": "object",
+        "description": "`POST /v1/admin/integrators`: a name, and how long the credential lasts.",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "expires_in_days": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Days until the credential expires, from 1 to 3650; absent for no expiry.",
+            "minimum": 0
+          },
+          "name": {
+            "type": "string",
+            "description": "The integrator's name."
+          }
+        },
+        "additionalProperties": false
+      },
+      "IssueKey": {
+        "type": "object",
+        "description": "`POST …/keys`: everything is optional.",
+        "properties": {
+          "expires_in_days": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Days until the key expires; omit for a key that does not expire.",
+            "maximum": 3650,
+            "minimum": 1
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A name a person can read."
+          },
+          "rate_limit_per_day": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Requests allowed per day; omit for no limit.",
+            "minimum": 1
+          },
+          "rate_limit_per_minute": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Requests allowed per minute; omit for no limit.",
+            "minimum": 1
+          }
+        }
+      },
+      "IssuedIntegrator": {
+        "type": "object",
+        "description": "A newly issued integrator: the only reply that carries the credential.",
+        "required": [
+          "id",
+          "name",
+          "prefix",
+          "credential",
+          "expires_at"
+        ],
+        "properties": {
+          "credential": {
+            "type": "string",
+            "description": "The `gmi_` secret, shown once: it is not stored and no later call returns it."
+          },
+          "expires_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "RFC 3339, UTC; `null` when the credential does not expire."
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "prefix": {
+            "type": "string",
+            "description": "The first characters of the credential, for recognising it."
+          }
+        }
+      },
+      "IssuedKey": {
+        "type": "object",
+        "description": "A newly issued key. This is the only response that carries the secret.",
+        "required": [
+          "key_id",
+          "api_key",
+          "key_prefix",
+          "message"
+        ],
+        "properties": {
+          "api_key": {
+            "type": "string",
+            "description": "The `gmr_` secret, shown once: store it now, it cannot be retrieved again."
+          },
+          "key_id": {
+            "type": "string"
+          },
+          "key_prefix": {
+            "type": "string",
+            "description": "The first characters of the key, for display."
+          },
+          "message": {
+            "type": "string",
+            "description": "A reminder that the secret is shown once."
+          }
+        }
+      },
+      "KeyBody": {
+        "type": "object",
+        "description": "A key as listed: never the secret, never the hash.",
+        "required": [
+          "id",
+          "project_id",
+          "key_prefix",
+          "name",
+          "rate_limit_per_minute",
+          "rate_limit_per_day",
+          "created_at",
+          "expires_at",
+          "last_used_at",
+          "active"
+        ],
+        "properties": {
+          "active": {
+            "type": "boolean",
+            "description": "Whether the key is neither revoked nor expired."
+          },
+          "created_at": {
+            "type": "string",
+            "description": "RFC 3339, UTC."
+          },
+          "expires_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "RFC 3339, UTC; `null` when the key does not expire."
+          },
+          "id": {
+            "type": "string"
+          },
+          "key_prefix": {
+            "type": "string",
+            "description": "The first characters of the key, for display."
+          },
+          "last_used_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "RFC 3339, UTC; `null` until the key is first used."
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The name the key was given, or `null`."
+          },
+          "project_id": {
+            "type": "string"
+          },
+          "rate_limit_per_day": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Requests allowed per day, or `null` for no limit.",
+            "minimum": 0
+          },
+          "rate_limit_per_minute": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Requests allowed per minute, or `null` for no limit.",
+            "minimum": 0
+          }
+        }
+      },
+      "LogPage": {
+        "type": "object",
+        "description": "A page of the request log, newest first.",
+        "required": [
+          "logs",
+          "has_more",
+          "next_cursor"
+        ],
+        "properties": {
+          "has_more": {
+            "type": "boolean",
+            "description": "Whether older rows exist."
+          },
+          "logs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LogRow"
+            }
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Pass as `cursor` for the next page; `null` on the last page."
+          }
+        }
+      },
+      "LogRow": {
+        "type": "object",
+        "description": "One request in the log.",
+        "required": [
+          "id",
+          "model",
+          "provider",
+          "tokens_in",
+          "tokens_out",
+          "cost_charged",
+          "latency_ms",
+          "created_at",
+          "status"
+        ],
+        "properties": {
+          "cost_charged": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Always null: the engine holds no price (D-17).",
+            "minimum": 0
+          },
+          "created_at": {
+            "type": "string",
+            "description": "When it finished, RFC 3339, UTC."
+          },
+          "id": {
+            "type": "string",
+            "description": "The request's id."
+          },
+          "latency_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How long it took, in milliseconds.",
+            "minimum": 0
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The model that served it, or `null` when none did."
+          },
+          "provider": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The provider that served it, or `null` when none did."
+          },
+          "status": {
+            "type": "string",
+            "description": "How it ended: `completed`, `failed` or `cancelled`."
+          },
+          "tokens_in": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Input tokens, or `null` when the provider did not report them.",
+            "minimum": 0
+          },
+          "tokens_out": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Output tokens, or `null` when the provider did not report them.",
+            "minimum": 0
+          }
+        }
+      },
+      "MeBody": {
+        "type": "object",
+        "description": "The signed-in user.",
+        "required": [
+          "id",
+          "email",
+          "display_name",
+          "status",
+          "platform_admin",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "description": "RFC 3339, UTC."
+          },
+          "display_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The display name; `null` when the identity provider sent none."
+          },
+          "email": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "platform_admin": {
+            "type": "boolean",
+            "description": "Whether the user is a platform administrator."
+          },
+          "status": {
+            "$ref": "#/components/schemas/AccountStatusName"
+          }
+        }
+      },
+      "MemberBody": {
+        "type": "object",
+        "description": "A membership on the wire: a member who signed in, or an invitation.",
+        "required": [
+          "id",
+          "org_id",
+          "user_id",
+          "role_id",
+          "status",
+          "created_at",
+          "email",
+          "display_name"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "description": "RFC 3339, UTC."
+          },
+          "display_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The member's display name; `null` for an invitation."
+          },
+          "email": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The member's address, or the invited one."
+          },
+          "id": {
+            "type": "string",
+            "description": "The membership's id."
+          },
+          "org_id": {
+            "type": "string"
+          },
+          "role_id": {
+            "$ref": "#/components/schemas/RoleName"
+          },
+          "status": {
+            "$ref": "#/components/schemas/MembershipStatusName"
+          },
+          "user_id": {
+            "type": "string",
+            "description": "The member's user id; for an invitation no user holds yet, the membership's id."
+          }
+        }
+      },
+      "MembershipStatusName": {
+        "type": "string",
+        "description": "Whether a member has signed in.",
+        "enum": [
+          "active",
+          "invited"
+        ]
+      },
+      "ModelAllowlist": {
+        "type": "object",
+        "description": "A project's allowlist: the request of `PUT …/models` (the whole list, replaced) and the\nresponse of both `GET` and `PUT`.",
+        "required": [
+          "models"
+        ],
+        "properties": {
+          "models": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Catalogue model ids. An empty list allows no model."
+          }
+        },
+        "additionalProperties": false
+      },
+      "ModelCapabilities": {
+        "type": "object",
+        "description": "What a catalogue model supports.",
+        "required": [
+          "streaming",
+          "tools",
+          "vision",
+          "json_output"
+        ],
+        "properties": {
+          "json_output": {
+            "type": "boolean"
+          },
+          "streaming": {
+            "type": "boolean"
+          },
+          "tools": {
+            "type": "boolean"
+          },
+          "vision": {
+            "type": "boolean"
+          }
+        }
+      },
+      "ModelPerformance": {
+        "type": "object",
+        "description": "One model's share of the usage.",
+        "required": [
+          "model",
+          "requests",
+          "tokens",
+          "cost"
+        ],
+        "properties": {
+          "cost": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Always null: the engine holds no price (D-17).",
+            "minimum": 0
+          },
+          "model": {
+            "type": "string"
+          },
+          "requests": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How many requests it served.",
+            "minimum": 0
+          },
+          "tokens": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Tokens used; `null` when any count is unknown.",
+            "minimum": 0
+          }
+        }
+      },
+      "OnboardingBody": {
+        "type": "object",
+        "description": "The caller's onboarding state on the wire.",
+        "required": [
+          "current_step",
+          "completed_steps",
+          "onboarding_completed",
+          "workspace_disposition"
+        ],
+        "properties": {
+          "completed_steps": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OnboardingStepName"
+            },
+            "description": "The steps already left, in order."
+          },
+          "current_step": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/OnboardingStepName",
+                "description": "The step the caller is on; `null` once onboarding is completed."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "onboarding_completed": {
+            "type": "boolean",
+            "description": "Whether onboarding is completed."
+          },
+          "workspace_disposition": {
+            "type": "string",
+            "description": "Always `pending` for now."
+          }
+        }
+      },
+      "OnboardingStepName": {
+        "type": "string",
+        "description": "A step of the console's onboarding, in its order.",
+        "enum": [
+          "welcome",
+          "survey",
+          "profile",
+          "create_org",
+          "create_project",
+          "api_key",
+          "finish"
+        ]
+      },
+      "OrganisationBody": {
+        "type": "object",
+        "description": "An organisation on the wire.",
+        "required": [
+          "id",
+          "name",
+          "slug",
+          "status",
+          "created_at",
+          "updated_at",
+          "member_count",
+          "project_count"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "description": "RFC 3339, UTC."
+          },
+          "id": {
+            "type": "string"
+          },
+          "member_count": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "name": {
+            "type": "string"
+          },
+          "project_count": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "slug": {
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/ResourceStatusName"
+          },
+          "updated_at": {
+            "type": "string",
+            "description": "RFC 3339, UTC."
+          }
+        }
+      },
+      "ParkedUsageBody": {
+        "type": "object",
+        "description": "A parked usage export: metadata only, never the receiver's reply.",
+        "required": [
+          "event_id",
+          "status",
+          "reason",
+          "parked_at"
+        ],
+        "properties": {
+          "event_id": {
+            "type": "string"
+          },
+          "parked_at": {
+            "type": "string",
+            "description": "RFC 3339, UTC."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A bounded failure classification; `null` when none was recorded."
+          },
+          "status": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The receiver's HTTP status; `null` when none was returned.",
+            "minimum": 0
+          }
+        }
+      },
+      "ParkedUsagePage": {
+        "type": "object",
+        "description": "The parked exports, oldest first.",
+        "required": [
+          "events"
+        ],
+        "properties": {
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ParkedUsageBody"
+            }
+          }
+        }
+      },
+      "PlatformMembershipBody": {
+        "type": "object",
+        "description": "A user's organisation and role, in a directory row.",
+        "required": [
+          "org_id",
+          "org_name",
+          "role"
+        ],
+        "properties": {
+          "org_id": {
+            "type": "string"
+          },
+          "org_name": {
+            "type": "string"
+          },
+          "role": {
+            "$ref": "#/components/schemas/RoleName"
+          }
+        }
+      },
+      "PlatformOrgBody": {
+        "type": "object",
+        "description": "An organisation row on the wire. The billing columns are integer minor units, `0` until\nbilling exists.",
+        "required": [
+          "id",
+          "name",
+          "slug",
+          "plan",
+          "status",
+          "revenue",
+          "provider_cost",
+          "written_off",
+          "uncollected",
+          "bleed",
+          "write_off_rate",
+          "recovery_rate",
+          "requests",
+          "tokens",
+          "last_activity",
+          "created_at",
+          "member_count",
+          "project_count"
+        ],
+        "properties": {
+          "bleed": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "created_at": {
+            "type": "string",
+            "description": "RFC 3339, UTC."
+          },
+          "id": {
+            "type": "string"
+          },
+          "last_activity": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "RFC 3339, UTC; `null` when the window holds no request."
+          },
+          "member_count": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "name": {
+            "type": "string"
+          },
+          "plan": {
+            "type": "string",
+            "description": "Always `none` for now."
+          },
+          "project_count": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "provider_cost": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "recovery_rate": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "requests": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Requests in the window.",
+            "minimum": 0
+          },
+          "revenue": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "slug": {
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/ResourceStatusName"
+          },
+          "tokens": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Tokens in the window; `null` when some are unknown.",
+            "minimum": 0
+          },
+          "uncollected": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "write_off_rate": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "written_off": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "PlatformOrgDetail": {
+        "type": "object",
+        "description": "One organisation and its projects.",
+        "required": [
+          "org",
+          "projects",
+          "projects_incomplete"
+        ],
+        "properties": {
+          "org": {
+            "$ref": "#/components/schemas/PlatformOrgBody"
+          },
+          "projects": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PlatformProjectBody"
+            }
+          },
+          "projects_incomplete": {
+            "type": "boolean",
+            "description": "Whether more projects exist than the bound shows."
+          }
+        }
+      },
+      "PlatformOrgsPage": {
+        "type": "object",
+        "description": "The oldest organisations.",
+        "required": [
+          "orgs",
+          "incomplete"
+        ],
+        "properties": {
+          "incomplete": {
+            "type": "boolean",
+            "description": "Whether more organisations exist than the bound shows."
+          },
+          "orgs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PlatformOrgBody"
+            }
+          }
+        }
+      },
+      "PlatformProjectBody": {
+        "type": "object",
+        "description": "A project row on the wire. The billing columns are integer minor units, `0` until billing\nexists.",
+        "required": [
+          "id",
+          "name",
+          "plan",
+          "status",
+          "revenue",
+          "provider_cost",
+          "written_off",
+          "uncollected",
+          "bleed",
+          "write_off_rate",
+          "recovery_rate",
+          "requests",
+          "tokens",
+          "last_activity",
+          "created_at",
+          "org_id",
+          "org_name",
+          "key_count"
+        ],
+        "properties": {
+          "bleed": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "created_at": {
+            "type": "string",
+            "description": "RFC 3339, UTC."
+          },
+          "id": {
+            "type": "string"
+          },
+          "key_count": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "last_activity": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "RFC 3339, UTC; `null` when the window holds no request."
+          },
+          "name": {
+            "type": "string"
+          },
+          "org_id": {
+            "type": "string"
+          },
+          "org_name": {
+            "type": "string"
+          },
+          "plan": {
+            "type": "string",
+            "description": "Always `none` for now."
+          },
+          "provider_cost": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "recovery_rate": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "requests": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Requests in the window.",
+            "minimum": 0
+          },
+          "revenue": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "status": {
+            "$ref": "#/components/schemas/ResourceStatusName"
+          },
+          "tokens": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Tokens in the window; `null` when some are unknown.",
+            "minimum": 0
+          },
+          "uncollected": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "write_off_rate": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "written_off": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "PlatformProjectDetail": {
+        "type": "object",
+        "description": "One project.",
+        "required": [
+          "project"
+        ],
+        "properties": {
+          "project": {
+            "$ref": "#/components/schemas/PlatformProjectBody"
+          }
+        }
+      },
+      "PlatformProjectsPage": {
+        "type": "object",
+        "description": "The oldest projects.",
+        "required": [
+          "projects",
+          "incomplete"
+        ],
+        "properties": {
+          "incomplete": {
+            "type": "boolean",
+            "description": "Whether more projects exist than the bound shows."
+          },
+          "projects": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PlatformProjectBody"
+            }
+          }
+        }
+      },
+      "PlatformUserBody": {
+        "type": "object",
+        "description": "A user on the wire.",
+        "required": [
+          "id",
+          "email",
+          "username",
+          "created_at",
+          "active",
+          "onboarding_completed",
+          "orgs",
+          "deletion_status",
+          "last_active_api",
+          "last_active_console"
+        ],
+        "properties": {
+          "active": {
+            "type": "boolean",
+            "description": "Whether the user may sign in (not suspended)."
+          },
+          "created_at": {
+            "type": "string",
+            "description": "RFC 3339, UTC."
+          },
+          "deletion_status": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Always `null` until deletion exists."
+          },
+          "email": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "last_active_api": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Always `null` until activity is tracked."
+          },
+          "last_active_console": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Always `null` until activity is tracked."
+          },
+          "onboarding_completed": {
+            "type": "boolean"
+          },
+          "orgs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PlatformMembershipBody"
+            }
+          },
+          "username": {
+            "type": "string",
+            "description": "The display name, or the address when the user has none."
+          }
+        }
+      },
+      "PlatformUsersPage": {
+        "type": "object",
+        "description": "A page of users.",
+        "required": [
+          "users",
+          "total"
+        ],
+        "properties": {
+          "total": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How many users match in all, beyond this page.",
+            "minimum": 0
+          },
+          "users": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PlatformUserBody"
+            }
+          }
+        }
+      },
+      "ProjectBody": {
+        "type": "object",
+        "description": "A project on the wire.",
+        "required": [
+          "id",
+          "ref",
+          "name",
+          "org_id",
+          "status",
+          "default_model",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "description": "RFC 3339, UTC."
+          },
+          "default_model": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A catalogue model id, or `null` when the project has no default."
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "org_id": {
+            "type": "string"
+          },
+          "ref": {
+            "type": "string",
+            "description": "The project's short reference."
+          },
+          "status": {
+            "$ref": "#/components/schemas/ResourceStatusName"
+          }
+        }
+      },
+      "RenameOrganisation": {
+        "type": "object",
+        "description": "`PATCH /v1/orgs/{org}`: the new name, the only field M1 changes. Any other field (`plan`,\n`status`, …) is refused, never silently ignored.",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "The new name."
+          }
+        },
+        "additionalProperties": false
+      },
+      "RequeuedBody": {
+        "type": "object",
+        "description": "How many parked exports were queued again.",
+        "required": [
+          "requeued"
+        ],
+        "properties": {
+          "requeued": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "ResourceStatusName": {
+        "type": "string",
+        "description": "A resource's status on the wire (an organisation or a project).",
+        "enum": [
+          "active",
+          "suspended",
+          "locked"
+        ]
+      },
+      "RoleBody": {
+        "type": "object",
+        "description": "A role and the permissions the decision table gives it.",
+        "required": [
+          "id",
+          "name",
+          "permissions"
+        ],
+        "properties": {
+          "id": {
+            "$ref": "#/components/schemas/RoleName"
+          },
+          "name": {
+            "$ref": "#/components/schemas/RoleName"
+          },
+          "permissions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Permission names such as `organisation:read`, in a fixed order."
+          }
+        }
+      },
+      "RoleName": {
+        "type": "string",
+        "description": "A role's name on the wire.",
+        "enum": [
+          "owner",
+          "admin",
+          "developer"
+        ]
+      },
+      "SetCredential": {
+        "type": "object",
+        "required": [
+          "credential"
+        ],
+        "properties": {
+          "credential": {
+            "type": "string",
+            "maxLength": 4096,
+            "minLength": 8,
+            "pattern": "^[!-~]{8,4096}$"
+          },
+          "policy": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/CredentialPolicy"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "SuperadminBody": {
+        "type": "object",
+        "description": "The platform administrator's own answer.",
+        "required": [
+          "superadmin"
+        ],
+        "properties": {
+          "superadmin": {
+            "type": "boolean",
+            "description": "Always `true`: anyone else never reaches the route."
+          }
+        }
+      },
+      "SupplierCapabilities": {
+        "type": "object",
+        "required": [
+          "streaming",
+          "tools",
+          "vision",
+          "json_output"
+        ],
+        "properties": {
+          "json_output": {
+            "type": "boolean"
+          },
+          "streaming": {
+            "type": "boolean"
+          },
+          "tools": {
+            "type": "boolean"
+          },
+          "vision": {
+            "type": "boolean"
+          }
+        }
+      },
+      "SupplierCatalogueResponse": {
+        "type": "object",
+        "required": [
+          "version",
+          "models"
+        ],
+        "properties": {
+          "models": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SupplierModelResponse"
+            }
+          },
+          "version": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "SupplierDelivery": {
+        "type": "string",
+        "enum": [
+          "direct",
+          "openrouter"
+        ]
+      },
+      "SupplierLimits": {
+        "type": "object",
+        "required": [
+          "context_tokens",
+          "max_output_tokens"
+        ],
+        "properties": {
+          "context_tokens": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "max_output_tokens": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        }
+      },
+      "SupplierModelResponse": {
+        "type": "object",
+        "required": [
+          "id",
+          "provider",
+          "delivery",
+          "capabilities",
+          "limits",
+          "supplier_price"
+        ],
+        "properties": {
+          "capabilities": {
+            "$ref": "#/components/schemas/SupplierCapabilities"
+          },
+          "delivery": {
+            "$ref": "#/components/schemas/SupplierDelivery"
+          },
+          "id": {
+            "type": "string"
+          },
+          "limits": {
+            "$ref": "#/components/schemas/SupplierLimits"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "routing_class": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/SupplierRoutingClass"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "supplier_price": {
+            "$ref": "#/components/schemas/SupplierPriceResponse"
+          }
+        }
+      },
+      "SupplierPriceResponse": {
+        "type": "object",
+        "required": [
+          "input_per_million",
+          "output_per_million"
+        ],
+        "properties": {
+          "cached_input_per_million": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "input_per_million": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "output_per_million": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "SupplierRoutingClass": {
+        "type": "string",
+        "enum": [
+          "light",
+          "standard",
+          "advanced"
+        ]
+      },
+      "TimeRange": {
+        "type": "object",
+        "description": "The window a usage report covers.",
+        "required": [
+          "start",
+          "end"
+        ],
+        "properties": {
+          "end": {
+            "type": "string",
+            "description": "RFC 3339, UTC."
+          },
+          "start": {
+            "type": "string",
+            "description": "RFC 3339, UTC."
+          }
+        }
+      },
+      "UpdateProject": {
+        "type": "object",
+        "description": "`PATCH /v1/orgs/{org}/projects/{project}`: exactly one of name, tenant status, or default\nmodel. Null clears the default; omission leaves it unchanged.\n\nSend exactly one of `name`, `status` (`active` or `suspended`) or `default_model`; `null`\nclears the default.",
+        "properties": {
+          "default_model": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A catalogue model id; `null` clears the default."
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The new name."
+          },
+          "status": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`active` or `suspended`."
+          }
+        },
+        "additionalProperties": false
+      },
+      "UsageReport": {
+        "type": "object",
+        "description": "A project's usage over a window.",
+        "required": [
+          "summary",
+          "model_performance",
+          "time_range"
+        ],
+        "properties": {
+          "model_performance": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ModelPerformance"
+            },
+            "description": "Requests and tokens per model served."
+          },
+          "summary": {
+            "$ref": "#/components/schemas/UsageSummaryBody"
+          },
+          "time_range": {
+            "$ref": "#/components/schemas/TimeRange"
+          }
+        }
+      },
+      "UsageSummaryBody": {
+        "type": "object",
+        "description": "The totals of a usage window.",
+        "required": [
+          "total_requests",
+          "successful_requests",
+          "total_tokens",
+          "total_cost",
+          "average_latency_ms",
+          "p95_latency_ms",
+          "p99_latency_ms",
+          "percentile_sample_count",
+          "percentiles_sampled",
+          "success_rate",
+          "error_rate"
+        ],
+        "properties": {
+          "average_latency_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The mean latency in milliseconds, rounded; 0 with no request.",
+            "minimum": 0
+          },
+          "error_rate": {
+            "type": "number",
+            "format": "double",
+            "description": "`1 - success_rate`; 0 with no request."
+          },
+          "p95_latency_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The 95th percentile latency in milliseconds; 0 with no request.",
+            "minimum": 0
+          },
+          "p99_latency_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The 99th percentile latency in milliseconds; 0 with no request.",
+            "minimum": 0
+          },
+          "percentile_sample_count": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How many of the newest request latencies informed the percentiles.",
+            "minimum": 0
+          },
+          "percentiles_sampled": {
+            "type": "boolean",
+            "description": "Whether the percentiles cover only the newest part of the window."
+          },
+          "success_rate": {
+            "type": "number",
+            "format": "double",
+            "description": "Completed requests over all requests; 0 with no request."
+          },
+          "successful_requests": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Those that completed.",
+            "minimum": 0
+          },
+          "total_cost": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Always null: the engine holds no price (D-17).",
+            "minimum": 0
+          },
+          "total_requests": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Requests that finished in the window.",
+            "minimum": 0
+          },
+          "total_tokens": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Tokens used; `null` when any request's input or output count is unknown, 0 for an empty\nwindow.",
+            "minimum": 0
+          }
+        }
+      }
+    },
+    "responses": {
+      "Error": {
+        "description": "The error envelope; the request id is also in `x-request-id`",
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/ErrorEnvelope"
+            }
+          }
+        }
+      }
+    },
+    "securitySchemes": {
+      "AdminBearer": {
+        "type": "http",
+        "scheme": "bearer"
+      },
+      "IntegratorKey": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "gmi_",
+        "description": "A platform-issued integrator credential: provisioning operations only"
+      }
+    }
+  },
+  "security": [
+    {
+      "AdminBearer": []
+    }
+  ]
+}
