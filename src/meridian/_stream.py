@@ -8,7 +8,18 @@ from typing import Any, Literal, cast
 
 import httpx
 
-from ._errors import Err, MeridianError, Ok, Result, client_error, error_from_envelope, parse_envelope
+from ._errors import (
+    NOT_JSON,
+    Err,
+    MeridianError,
+    Ok,
+    Result,
+    client_error,
+    envelope_of,
+    error_from_envelope,
+    error_member,
+    load_json,
+)
 from ._sse import EventDecoder, EventTooLarge
 
 USAGE_KEYS = ('prompt_tokens', 'completion_tokens', 'total_tokens')
@@ -43,29 +54,35 @@ class _State:
         self.finished = False
 
     def step(self, data: str) -> ChatChunk | Literal['skip', 'done']:
-        # [1] The end marker, or the engine's final error frame
+        # [1] The end marker, or a frame that is not JSON
         if data == '[DONE]':
             return 'done'
-        envelope = parse_envelope(data)
-        if envelope is not None:
+        raw: Any = load_json(data)
+        if raw is NOT_JSON:
+            self.error = self.failure('network_error', 'The stream sent a frame that is not valid JSON.')
+            return 'done'
+
+        # [2] A frame with an error member is the engine's final error frame when it is an envelope with a code and a
+        # message; any other error member (or a case variant of a member the SDK reads) cannot be read and ends it
+        member = error_member(raw)
+        if member is not None:
+            envelope = envelope_of(member)
+            if envelope is None:
+                self.error = self.failure('network_error', 'The stream sent an error frame that cannot be read.')
+                return 'done'
             error = error_from_envelope(envelope)
             self.error = (
                 error if error.request_id or not self.request_id else replace(error, request_id=self.request_id)
             )
             return 'done'
 
-        # [2] Anything else must be a chat chunk
-        try:
-            raw: Any = json.loads(data)
-        except (ValueError, RecursionError):
-            self.error = self.failure('network_error', 'The stream sent a frame that is not valid JSON.')
-            return 'done'
+        # [3] Anything else must be a chat chunk
         if not isinstance(raw, dict) or not isinstance(raw.get('choices'), list):  # pyright: ignore[reportUnknownMemberType]
             self.error = self.failure('network_error', 'The stream sent a frame that is not a chat chunk.')
             return 'done'
         chunk: dict[str, Any] = raw  # pyright: ignore[reportUnknownVariableType]
 
-        # [3] The usage chunk has no choices; a text chunk carries its delta
+        # [4] The usage chunk has no choices; a text chunk carries its delta
         choices: list[Any] = chunk['choices']
         if not choices:
             if isinstance(chunk.get('usage'), dict):

@@ -196,6 +196,51 @@ async def test_chat_params_holding_nan_or_infinity_are_refused_with_nothing_sent
     assert engine.requests == []
 
 
+# Bodies a case-insensitive decoder (Go's encoding/json) reads one way and a browser's JSON.parse another: never judged
+P1 = {
+    'error': {'message': 'm', 'type': 'rate_limit_error', 'code': 'insufficient_credit', 'request_id': 'req_p1'},
+    'Error': None,
+    'choices': [{'index': 0, 'message': {'role': 'assistant', 'content': 'hey'}, 'finish_reason': 'stop'}],
+}
+P1B = {'error': {'message': 'm', 'type': 'rate_limit_error', 'code': 'insufficient_credit', 'Code': 'rate_limited'}}
+CASE_VARIANTS = [
+    pytest.param(P1, id='P1'),
+    pytest.param(P1B, id='P1b'),
+    pytest.param({**completion('hey'), 'Error': 'x'}, id='top-level-Error'),
+    pytest.param({**completion('hey'), 'ERROR': None}, id='top-level-ERROR-null'),
+    pytest.param({**completion('hey'), 'CHOICES': []}, id='top-level-CHOICES'),
+]
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize('body', CASE_VARIANTS)
+async def test_a_2xx_reply_with_a_case_variant_of_a_member_the_sdk_reads_fails_closed(
+    mode: str, engine: Any, body: Any
+) -> None:
+    engine.next(Scripted(status=200, json=body))
+    result = await resolve(make_client(mode, engine).chat.create({'messages': MSG}))
+    assert (result.error.code, result.error.status) == ('network_error', 200)
+
+
+@pytest.mark.anyio
+async def test_an_error_body_with_a_case_variant_of_its_code_is_no_envelope(
+    mode: str, engine: Any, clock: list[float]
+) -> None:
+    engine.next(Scripted(status=402, headers={'x-request-id': 'req_v'}, json=P1B))
+    result = await resolve(make_client(mode, engine).chat.create({'messages': MSG}))
+    assert (result.error.code, result.error.status, result.error.request_id) == ('network_error', 402, 'req_v')
+
+
+@pytest.mark.anyio
+async def test_case_variants_deeper_than_the_envelope_are_ordinary_content(mode: str, engine: Any) -> None:
+    reply = completion('hey')
+    reply['choices'][0]['message']['Error'] = {'Code': 'x'}
+    reply['usage']['Error'] = None
+    engine.next(Scripted(json=reply))
+    result = await resolve(make_client(mode, engine).chat.create({'messages': MSG}))
+    assert result.error is None and result.data['choices'][0]['message']['Error'] == {'Code': 'x'}
+
+
 CLIENTS = {
     'Meridian': (Meridian, 'sync'),
     'AsyncMeridian': (AsyncMeridian, 'async'),

@@ -13,8 +13,20 @@ from typing import Any, cast
 import httpx
 
 from . import _clock
-from ._config import DEFAULT_MAX_RETRIES, DEFAULT_TIMEOUT, sane_retries, sane_timeout
-from ._errors import Err, MeridianError, Ok, Result, client_error, config_error, error_from_body, valid_request_id
+from ._config import DEFAULT_MAX_RETRIES, DEFAULT_TIMEOUT, given_timeout, sane_retries
+from ._errors import (
+    NOT_JSON,
+    Err,
+    MeridianError,
+    Ok,
+    Result,
+    client_error,
+    config_error,
+    error_from_body,
+    error_member,
+    load_json,
+    valid_request_id,
+)
 from ._version import __version__
 
 _NO_BODY: Any = object()
@@ -29,13 +41,13 @@ __all__ = [
     'RefusedTransport',
     'SyncTransport',
     'new_idempotency_key',
-    'next_wait',
     'retry_after_seconds',
 ]
 
 BASE_DELAY = 0.5
 MAX_JITTER = 0.25
 MAX_RETRY_AFTER = 30.0
+CHAT_READ_TIMEOUT = 300.0  # a buffered chat reply may take minutes to write: its default wait to read
 # An error body is read this far (an envelope is a few hundred bytes); a buffered reply this far. A body over its cap
 # is refused, never truncated: the cap plus one byte is read, and no more (meridian-go's limits)
 MAX_ERROR_BODY_BYTES = 1 << 20
@@ -61,6 +73,7 @@ class Call:
     repeatable: bool = False
     object_body: bool = False  # True: a 2xx body that is not a JSON object is a transport failure
     no_content: bool = False  # True: the operation answers 204 with no body (a DELETE); no other call accepts a 204
+    read_timeout: float | None = None  # this call's own default wait to read (a caller's timeout overrides it)
 
 
 def new_idempotency_key() -> str:
@@ -114,21 +127,43 @@ def may_repeat(call: Call) -> bool:
     return call.repeatable or call.idempotency_key is not None or call.method.upper() in ('GET', 'DELETE')
 
 
-def next_wait(tried: int, error: MeridianError, retry_after: str | None, call: Call, max_retries: int) -> float | None:
-    """Seconds to wait before the next attempt, or None to stop and return the error."""
-    # [1] A final error, a spent budget, or a call unsafe to repeat (unless the server refused it before running it)
-    if not error.retryable or tried >= max_retries:
-        return None
-    if not may_repeat(call) and error.code != 'rate_limited':
-        return None
+class _Attempts:
+    """The retry state of one call, without any I/O: how many attempts failed, and the last failure. Each failure goes
+    in through `after`, which answers the seconds to wait before the next attempt, or the error to return."""
 
-    # [2] A server asking for a long wait gets its answer now
-    wait = retry_after_seconds(retry_after)
-    if wait is not None:
-        return None if wait > MAX_RETRY_AFTER else wait
+    def __init__(self, call: Call, max_retries: int) -> None:
+        self._call = call
+        self._max_retries = max_retries
+        self._tried = 0
+        self._previous: MeridianError | None = None
 
-    # [3] Exponential backoff with jitter
-    return BASE_DELAY * 2**tried + random.uniform(0, MAX_JITTER)
+    def after(self, error: MeridianError, retry_after: str | None) -> float | MeridianError:
+        # [1] A retry that finds its own key in use: the attempt before it reached the engine, which still holds the
+        # key, and failed; that failure is the answer. Not after a rate limit: the engine releases a key it refused
+        # before running the attempt, so a conflict then is a real one
+        previous, self._previous = self._previous, error
+        if (
+            previous is not None
+            and self._call.idempotency_key is not None
+            and error.code == 'idempotency_conflict'
+            and previous.code != 'rate_limited'
+        ):
+            return previous
+
+        # [2] A final error, a spent budget, or a call unsafe to repeat (unless the server refused it before running it)
+        if not error.retryable or self._tried >= self._max_retries:
+            return error
+        if not may_repeat(self._call) and error.code != 'rate_limited':
+            return error
+
+        # [3] A server asking for a long wait gets its answer now; otherwise its wait, or backoff with jitter
+        wait = retry_after_seconds(retry_after)
+        if wait is not None and wait > MAX_RETRY_AFTER:
+            return error
+        if wait is None:
+            wait = BASE_DELAY * 2**self._tried + random.uniform(0, MAX_JITTER)
+        self._tried += 1
+        return wait
 
 
 class _Shared:
@@ -137,8 +172,15 @@ class _Shared:
     def __init__(self, base_url: str, key: str | None, timeout: object, max_retries: object) -> None:
         self.base = base_url.rstrip('/')
         self.key = key
-        self.timeout = sane_timeout(timeout)
+        # The caller's timeout applies to every call; without one, each call has its own default (CHAT_READ_TIMEOUT
+        # to read a buffered chat reply, DEFAULT_TIMEOUT for everything else)
+        self.given_timeout = given_timeout(timeout)
         self.max_retries = sane_retries(max_retries)
+
+    def timeout(self, call: Call) -> httpx.Timeout:
+        if self.given_timeout is not None:
+            return httpx.Timeout(self.given_timeout)
+        return httpx.Timeout(DEFAULT_TIMEOUT, read=call.read_timeout or DEFAULT_TIMEOUT)
 
     def request(self, client: httpx.Client | httpx.AsyncClient, call: Call) -> httpx.Request:
         # [1] Query encoded once; undefined and empty values left out
@@ -160,16 +202,18 @@ class _Shared:
             params=params or None,
             headers=headers,
             content=content,
-            timeout=self.timeout,
+            timeout=self.timeout(call),
         )
 
-    def failure(self, exc: BaseException) -> MeridianError:
+    def failure(self, exc: BaseException, call: Call) -> MeridianError:
         if isinstance(exc, UnicodeError):  # the message would quote a character of the request, maybe of a secret
             return config_error('The request could not be built: it holds text that cannot be encoded.')
         if not isinstance(exc, httpx.HTTPError):  # a URL, header or body httpx cannot encode: our setup, not the wire
             return config_error(f'The request could not be built: {exc}')
         if isinstance(exc, httpx.TimeoutException):
-            return client_error('network_error', f'No response within {self.timeout:g} s.')
+            timeout = self.timeout(call)
+            seconds = timeout.read if isinstance(exc, httpx.ReadTimeout) else timeout.connect
+            return client_error('network_error', f'No response within {seconds or DEFAULT_TIMEOUT:g} s.')
         return client_error('network_error', 'The network request failed.')
 
     @staticmethod
@@ -210,21 +254,20 @@ class _Shared:
         status, header_id = response.status_code, response.headers.get('x-request-id')
         if raw is None:
             return _Shared.too_large(response)
-        try:
-            data: Any = json.loads(raw.decode('utf-8', 'replace'))
-        except (ValueError, RecursionError):
+        data: Any = load_json(raw.decode('utf-8', 'replace'))
+        if data is NOT_JSON:
             return Err(client_error('network_error', 'The response was not valid JSON.', status))
         if data is None:  # a literal null is nothing: no call takes it for a result
             return Err(client_error('network_error', 'The response was empty (JSON null).', status))
 
-        # [2] A reply that says `error` is no result, whatever else it holds: every result is an object without one.
-        # The error's own request id is kept when it is fit to show, else the response's
-        error: Any = cast('dict[str, Any]', data).get('error') if isinstance(data, dict) else None
+        # [2] A reply that says `error` is no result, whatever else it holds: every result is an object without one,
+        # and a case variant of a member the SDK reads is never judged. The error's own request id is kept when it
+        # is fit to show, else the response's
+        error = error_member(data)
         if error is not None:
             own: Any = cast('dict[str, Any]', error).get('request_id') if isinstance(error, dict) else None
-            usable = valid_request_id(own) or header_id
             message = "The engine's reply carried an error instead of a result."
-            return Err(replace(client_error('network_error', message, status), request_id=usable))
+            return Err(client_error('network_error', message, status, valid_request_id(own) or header_id))
         if call.object_body and not isinstance(data, dict):
             return Err(client_error('network_error', 'The response was not a JSON object.', status))
         return Ok[Any](None if call.no_content else data, request_id=header_id)
@@ -250,7 +293,7 @@ class SyncTransport:
         try:
             response = self._client.send(self._shared.request(self._client, call), stream=True)
         except _SEND_ERRORS as exc:
-            return None, self._shared.failure(exc), None
+            return None, self._shared.failure(exc, call), None
         if response.is_success:
             return response, None, None
 
@@ -274,19 +317,18 @@ class SyncTransport:
         return bytes(data)
 
     def open(self, call: Call) -> Result[httpx.Response]:
-        # [1] Attempt, backing off between retryable failures; the same Call (and key) every time
-        tried = 0
+        # [1] Attempt, and wait as _Attempts says between failures; the same Call (and key) every time
+        attempts = _Attempts(call, self._shared.max_retries)
         while True:
             response, error, retry_after = self._attempt(call)
             if response is not None:
                 return Ok(response)
             if error is None:  # unreachable, but never an assert: python -O must still not raise
                 return Err(client_error('network_error', 'The request failed.'))
-            wait = next_wait(tried, error, retry_after, call, self._shared.max_retries)
-            if wait is None:
-                return Err(error)
+            wait = attempts.after(error, retry_after)
+            if isinstance(wait, MeridianError):
+                return Err(wait)
             _clock.sleep(wait)
-            tried += 1
 
     def json(self, call: Call) -> Result[Any]:
         # [1] The response, or the failure to get one
@@ -335,7 +377,7 @@ class AsyncTransport:
         try:
             response = await self._client.send(self._shared.request(self._client, call), stream=True)
         except _SEND_ERRORS as exc:
-            return None, self._shared.failure(exc), None
+            return None, self._shared.failure(exc, call), None
         if response.is_success:
             return response, None, None
 
@@ -359,19 +401,18 @@ class AsyncTransport:
         return bytes(data)
 
     async def open(self, call: Call) -> Result[httpx.Response]:
-        # [1] Attempt, backing off between retryable failures; a CancelledError in the wait propagates
-        tried = 0
+        # [1] Attempt, and wait as _Attempts says between failures; a CancelledError in the wait propagates
+        attempts = _Attempts(call, self._shared.max_retries)
         while True:
             response, error, retry_after = await self._attempt(call)
             if response is not None:
                 return Ok(response)
             if error is None:  # unreachable, but never an assert: python -O must still not raise
                 return Err(client_error('network_error', 'The request failed.'))
-            wait = next_wait(tried, error, retry_after, call, self._shared.max_retries)
-            if wait is None:
-                return Err(error)
+            wait = attempts.after(error, retry_after)
+            if isinstance(wait, MeridianError):
+                return Err(wait)
             await _clock.asleep(wait)
-            tried += 1
 
     async def json(self, call: Call) -> Result[Any]:
         # [1] The response, or the failure to get one

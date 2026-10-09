@@ -181,6 +181,41 @@ async def test_a_failure_on_the_sdks_side_of_a_stream_keeps_the_responses_reques
     assert (s.error.code, s.error.request_id) == ('network_error', 'req_stream')
 
 
+P1_FRAME = {
+    'error': {'message': 'm', 'type': 'rate_limit_error', 'code': 'insufficient_credit'},
+    'Error': None,
+    'choices': [{'index': 0, 'delta': {'content': 'x'}, 'finish_reason': None}],
+}
+P1B_FRAME = {'error': {'message': 'm', 'type': 'rate_limit_error', 'code': 'insufficient_credit', 'Code': 'x'}}
+
+
+@pytest.mark.parametrize(
+    'bad',
+    [
+        pytest.param(P1_FRAME, id='P1'),
+        pytest.param(P1B_FRAME, id='P1b'),
+        pytest.param({**chunk('x'), 'Error': 'boom'}, id='top-level-Error'),
+        pytest.param({'error': {'message': 'm'}, **chunk('x')}, id='error-without-a-code-beside-choices'),
+        pytest.param({'error': 'boom', **chunk('x')}, id='error-string-beside-choices'),
+    ],
+)
+async def test_a_frame_with_an_error_the_sdk_cannot_read_ends_the_stream_closed(
+    mode: str, engine: Any, bad: Any
+) -> None:
+    s = await open_stream(mode, engine, frame(chunk('a')), frame(bad), frame(chunk('late')), frame('[DONE]'))
+    assert await collect(s) == ['a']
+    assert s.error.code == 'network_error'
+    assert engine.upstream_closed()
+
+
+async def test_a_chunk_whose_delta_holds_a_key_named_error_is_ordinary_content(mode: str, engine: Any) -> None:
+    odd = chunk('b')
+    odd['choices'][0]['delta']['Error'] = {'Code': 'insufficient_credit'}
+    odd['choices'][0]['delta']['error'] = 'not ours'
+    s = await open_stream(mode, engine, frame(chunk('a')), frame(odd), frame('[DONE]'))
+    assert await collect(s) == ['a', 'b'] and s.error is None
+
+
 async def test_a_frame_nested_too_deep_to_parse_is_a_network_error(mode: str, engine: Any) -> None:
     s = await open_stream(mode, engine, frame('[' * 100_000), frame('[DONE]'))
     assert await collect(s) == []

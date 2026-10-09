@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, Any, Protocol, TypeVar, cast
 
 from ._errors import Err, MeridianError, Ok, Result, config_error
 from ._stream import AsyncChatStream, ChatStream, token_counts
-from ._transport import Call, new_idempotency_key, valid_idempotency_key
+from ._transport import CHAT_READ_TIMEOUT, Call, new_idempotency_key, valid_idempotency_key
 
 if TYPE_CHECKING:
     from .types import ChatCompletion, ChatParams, ModelList
@@ -52,7 +52,14 @@ def chat_call(params: Mapping[str, Any], idempotency_key: str | None) -> Call | 
     key = idempotency(idempotency_key)
     if isinstance(key, MeridianError):
         return key
-    return Call('POST', CHAT_PATH, body=chat_body(params, False), idempotency_key=key, object_body=True)
+    return Call(
+        'POST',
+        CHAT_PATH,
+        body=chat_body(params, False),
+        idempotency_key=key,
+        object_body=True,
+        read_timeout=CHAT_READ_TIMEOUT,
+    )
 
 
 def stream_call(params: Mapping[str, Any], idempotency_key: str | None) -> Call | MeridianError:

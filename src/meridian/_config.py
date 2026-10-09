@@ -20,9 +20,14 @@ def _finite_number(value: object) -> float | None:
     return float(value) if math.isfinite(value) else None
 
 
-def sane_timeout(value: object) -> float:
+def given_timeout(value: object) -> float | None:
+    """The caller's timeout when it is a usable number of seconds (finite, > 0, not a bool); otherwise None."""
     number = _finite_number(value)
-    return number if number is not None and number > 0 else DEFAULT_TIMEOUT
+    return number if number is not None and number > 0 else None
+
+
+def sane_timeout(value: object) -> float:
+    return given_timeout(value) or DEFAULT_TIMEOUT
 
 
 def sane_retries(value: object) -> int:

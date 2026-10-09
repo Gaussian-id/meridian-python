@@ -1713,6 +1713,48 @@ async def test_a_non_sse_json_body_as_the_whole_reply_to_a_stream_request_ends_c
     assert b'secret answer' not in out and out.endswith(b'\n\n') and last_event(out) == generic('req_h')
 
 
+# --- Case variants of the members the guard reads fail closed (a case-insensitive reader would see another body) ----
+
+P1 = {
+    'error': {'message': 'm', 'type': 'rate_limit_error', 'code': 'insufficient_credit', 'request_id': 'req_p1'},
+    'Error': None,
+    'choices': [{'index': 0, 'delta': {'content': 'x'}, 'finish_reason': None}],
+}
+P1B = {'error': {'message': 'm', 'type': 'rate_limit_error', 'code': 'insufficient_credit', 'Code': 'rate_limited'}}
+
+
+# A known end-user code whose case variant names the app's credit: a case-insensitive reader could take either
+P1B_REVERSED = {'error': {'message': 'm', 'type': 'rate_limit_error', 'code': 'rate_limited', 'Code': 'key_revoked'}}
+
+
+@pytest.mark.parametrize(
+    'body', [pytest.param(P1, id='P1'), pytest.param(P1B, id='P1b'), pytest.param(P1B_REVERSED, id='P1b-reversed')]
+)
+@pytest.mark.parametrize('status', [200, 402, 429])
+async def test_a_reply_with_a_case_variant_is_a_generic_503(mode: str, engine: Any, body: Any, status: int) -> None:
+    engine.next(Scripted(status=status, headers={'x-request-id': 'req_h'}, json=body))
+    reply = await send(build(mode, engine), {'messages': MSG})
+    assert reply.status == 503 and payload(reply)['error']['code'] == 'service_unavailable'
+    body = cast('bytes', reply.body)
+    assert b'insufficient_credit' not in body and b'rate_limited' not in body and b'key_revoked' not in body
+
+
+@pytest.mark.parametrize('bad', [pytest.param(P1, id='P1'), pytest.param(P1B, id='P1b')])
+async def test_a_frame_with_a_case_variant_ends_the_stream_closed(mode: str, engine: Any, bad: Any) -> None:
+    after = frame(chunk('after')).encode() + frame('[DONE]').encode()
+    reply = await stream_reply(mode, engine, [FIRST, frame(bad).encode(), after], headers={'x-request-id': 'req_h'})
+    out = await drain(reply)
+    assert b'after' not in out and b'insufficient_credit' not in out
+    assert last_event(out)['error']['code'] == 'service_unavailable' and engine.upstream_closed()
+
+
+async def test_a_chunk_whose_delta_holds_a_key_named_error_passes_byte_for_byte(mode: str, engine: Any) -> None:
+    odd = chunk('b')
+    odd['choices'][0]['delta']['Error'] = {'Code': 'insufficient_credit'}
+    wire = FIRST + frame(odd).encode() + frame('[DONE]').encode()
+    assert await drain(await stream_reply(mode, engine, [wire])) == wire
+
+
 async def test_comments_ids_retry_and_message_events_still_pass_byte_for_byte(mode: str, engine: Any) -> None:
     wire = (
         b': keepalive\n\n'

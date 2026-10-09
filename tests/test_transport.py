@@ -1,4 +1,3 @@
-import json
 from typing import Any
 
 import pytest
@@ -103,17 +102,106 @@ def test_a_future_http_date_is_a_wait() -> None:
     assert retry_after_seconds(None) is None
 
 
-def test_a_call_that_is_not_safe_to_repeat_retries_only_rate_limited() -> None:
-    from meridian._errors import error_from_body
-    from meridian._transport import Call, next_wait
+# --- A retry answered with idempotency_conflict -------------------------------------------------------------------
 
-    def err(code: str, status: int) -> Any:
-        body = json.dumps({'error': {'message': 'm', 'type': 'api_error', 'code': code, 'request_id': 'r'}})
-        return error_from_body(status, 'r', body)
 
-    unsafe = Call('POST', '/x')
-    assert next_wait(0, err('upstream_unavailable', 502), None, unsafe, 2) is None
-    assert next_wait(0, err('rate_limited', 429), '1', unsafe, 2) == 1.0
+def conflict() -> Scripted:
+    body = {'error': {'message': 'in use', 'type': 'invalid_request_error', 'code': 'idempotency_conflict'}}
+    return Scripted(status=409, headers={'x-request-id': 'req_409'}, json=body)
+
+
+def failed_before() -> dict[str, Scripted]:
+    return {
+        '503': Scripted(
+            status=503,
+            headers={'x-request-id': 'req_first'},
+            json={'error': {'message': 'down', 'type': 'api_error', 'code': 'service_unavailable'}},
+        ),
+        'network': Scripted(network_error=True),
+        'timeout': Scripted(timeout=True),
+    }
+
+
+@pytest.mark.parametrize('first', ['503', 'network', 'timeout'])
+@pytest.mark.parametrize('call', ['create', 'stream'])
+async def test_a_retry_that_finds_its_key_in_use_returns_the_earlier_failure(
+    mode: str, engine: Any, clock: list[float], call: str, first: str
+) -> None:
+    # The earlier attempt reached the engine (which now holds its key) and failed: that failure is the answer
+    engine.next(failed_before()[first], conflict())
+    alone = make_client(mode, engine, timeout=5)
+    result = await resolve(getattr(alone.chat, call)({'messages': MSG}))
+    engine.next(failed_before()[first])
+    expected = await resolve(getattr(make_client(mode, engine, timeout=5, max_retries=0).chat, call)({'messages': MSG}))
+    assert result.error == expected.error and result.error.code != 'idempotency_conflict'
+    assert (result.error.request_id, result.error.retryable) == (expected.error.request_id, expected.error.retryable)
+    assert len(engine.requests) == 3
+
+
+async def test_a_conflict_on_the_first_attempt_is_returned_as_it_is(mode: str, engine: Any, clock: list[float]) -> None:
+    engine.next(conflict())
+    result = await resolve(make_client(mode, engine).chat.create({'messages': MSG}))
+    assert (result.error.code, result.error.status, result.error.request_id) == ('idempotency_conflict', 409, 'req_409')
+
+
+async def test_a_conflict_after_a_rate_limit_is_a_real_conflict(mode: str, engine: Any, clock: list[float]) -> None:
+    # The engine releases the key when it refuses before running the attempt (rate_limited), so the 409 is genuine
+    engine.next(engine_error('rate_limited'), conflict())
+    result = await resolve(make_client(mode, engine).chat.create({'messages': MSG}))
+    assert (result.error.code, result.error.request_id) == ('idempotency_conflict', 'req_409')
+
+
+async def test_a_call_without_a_key_never_swaps_a_conflict(mode: str, engine: Any, clock: list[float]) -> None:
+    engine.next(engine_error('service_unavailable'), conflict())
+    result = await resolve(make_client(mode, engine).models.list())
+    assert (result.error.code, result.error.request_id) == ('idempotency_conflict', 'req_409')
+    assert len(engine.requests) == 2
+
+
+# --- How long an attempt waits ------------------------------------------------------------------------------------
+
+
+def timeouts(request: Any) -> dict[str, float]:
+    return dict(request.extensions['timeout'])
+
+
+async def test_a_buffered_chat_waits_300_s_to_read_by_default(mode: str, engine: Any) -> None:
+    client = make_client(mode, engine)
+    await resolve(client.chat.create({'messages': MSG}))
+    assert timeouts(engine.requests[0]) == {'connect': 60.0, 'read': 300.0, 'write': 60.0, 'pool': 60.0}
+
+
+async def test_streams_and_other_calls_wait_60_s_by_default(mode: str, engine: Any) -> None:
+    client = make_client(mode, engine)
+    engine.next(Scripted(chunks=['data: [DONE]\n\n']))
+    await resolve(client.chat.stream({'messages': MSG}))
+    await resolve(client.models.list())
+    assert [timeouts(r) for r in engine.requests] == [dict.fromkeys(('connect', 'read', 'write', 'pool'), 60.0)] * 2
+
+
+@pytest.mark.parametrize('given', [10, 0.5, 400])
+async def test_a_timeout_the_caller_sets_applies_to_every_call(mode: str, engine: Any, given: float) -> None:
+    client = make_client(mode, engine, timeout=given)
+    engine.next(Scripted(json=completion()), Scripted(chunks=['data: [DONE]\n\n']))
+    await resolve(client.chat.create({'messages': MSG}))
+    await resolve(client.chat.stream({'messages': MSG}))
+    await resolve(client.models.list())
+    expected = dict.fromkeys(('connect', 'read', 'write', 'pool'), float(given))
+    assert [timeouts(r) for r in engine.requests] == [expected] * 3
+
+
+@pytest.mark.parametrize('bad', [float('nan'), -1, 0, True, 'x'])
+async def test_a_timeout_that_is_no_usable_number_counts_as_not_set(mode: str, engine: Any, bad: Any) -> None:
+    await resolve(make_client(mode, engine, timeout=bad).chat.create({'messages': MSG}))
+    assert timeouts(engine.requests[0])['read'] == 300.0
+
+
+async def test_a_buffered_chat_that_times_out_reading_says_how_long_it_waited(
+    mode: str, engine: Any, clock: list[float]
+) -> None:
+    engine.next(*[Scripted(timeout=True)] * 3)
+    result = await resolve(make_client(mode, engine).chat.create({'messages': MSG}))
+    assert (result.error.code, result.error.message) == ('network_error', 'No response within 300 s.')
 
 
 # Which calls repeat after a failure that may have reached the engine is pinned through the public clients: a chat

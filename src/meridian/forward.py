@@ -27,7 +27,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Generic, Literal, Protocol, TypeVar, cast, runtime_checkable
 
 from ._client import AsyncMeridian, Meridian, async_shared_client, shared_client
-from ._errors import STATUS_BY_CODE, MeridianError, Result, config_error, valid_request_id
+from ._errors import STATUS_BY_CODE, MeridianError, Result, config_error, error_member, load_json, valid_request_id
 from ._stream import AsyncChatStream, ChatStream
 from ._transport import valid_idempotency_key
 
@@ -472,14 +472,16 @@ def _error_verdict(value: Any) -> tuple[_Verdict, str | None]:
     """What a parsed reply or event says through an `error` key, with the request id its envelope carries, if any:
     nothing (pass); an envelope about the app's own key, account or credit, or with a code this SDK does not know
     (hide); or a key that is set but is no object with a usable code (terminal)."""
-    # [1] No error key, or a null one, is an ordinary reply (the engine builds its chunks and completions without one)
-    error: Any = cast('dict[str, Any]', value).get('error') if isinstance(value, dict) else None
-    if error is None:
+    # [1] No error member, or a null one, is an ordinary reply (the engine builds its chunks and completions without
+    # one); content below the top level (such as choices[].delta) is never inspected
+    member = error_member(value)
+    if member is None:
         return 'pass', None
 
-    # [2] A key that is set must be an object with a non-empty string code; anything else cannot be read: terminal
-    code = cast('dict[str, Any]', error).get('code') if isinstance(error, dict) else None
-    carried = _carried_id(error)
+    # [2] A member that is set must be an object with a non-empty string code, and no member the guard reads may come
+    # in a case variant (error_member: MALFORMED); anything else cannot be read: terminal
+    carried = _carried_id(cast('dict[str, Any]', value).get('error'))
+    code = cast('dict[str, Any]', member).get('code') if isinstance(member, dict) else None
     if not (isinstance(code, str) and code):
         return 'terminal', carried
 
@@ -517,14 +519,9 @@ def _judge(event: bytes, first: bool) -> tuple[_Judgement, str | None]:
     if data == ['[DONE]']:
         return 'pass', None
 
-    # [3] The data must be a JSON object. Numbers are never converted, so no number can make a frame unreadable here
-    # yet readable in a browser
-    try:
-        parsed: Any = json.loads('\n'.join(data), parse_int=_skip, parse_float=_skip, parse_constant=_skip)
-    except RecursionError:
-        return 'unjudgeable', None
-    except ValueError:
-        return 'terminal', None
+    # [3] The data must be a JSON object (not JSON, or too deep to parse, is terminal). Numbers are never converted, so
+    # no number can make a frame unreadable here yet readable in a browser
+    parsed: Any = load_json('\n'.join(data), parse_int=_skip, parse_float=_skip, parse_constant=_skip)
     if not isinstance(parsed, dict):
         return 'terminal', None
 
@@ -713,17 +710,11 @@ def _streaming(request_id: str | None, body: ReplyBody | AsyncReplyBody) -> Repl
 
 
 def _buffered(result: Result[Any]) -> Reply[Any]:
+    # A 200 that carries an error member is no result: the client already made it a network_error (keeping the error's
+    # own valid request id), which is the generic 503 here like every SDK-side failure
     if result.error is not None:
         return _browser_error(result.error)
-
-    # The engine answers a failure with its error status, never a 200: a 200 that carries an `error` key (other than
-    # null) is served on only as the generic 503, whatever the key holds, with the error's own request id if it has a
-    # usable one, else the response's
-    data: Any = result.data
-    if isinstance(data, dict) and cast('dict[str, Any]', data).get('error') is not None:
-        request_id = _carried_id(cast('dict[str, Any]', data)['error']) or result.request_id
-        return _json_reply(503, _generic(request_id), request_id)
-    return _json_reply(200, data, result.request_id)
+    return _json_reply(200, result.data, result.request_id)
 
 
 # --- The two helpers ------------------------------------------------------------------------------------------------

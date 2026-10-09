@@ -136,21 +136,68 @@ def config_error(message: str) -> MeridianError:
     return MeridianError('invalid_request', 'client_error', 0, message, False)
 
 
+NOT_JSON: Final = object()  # what load_json gives for text that is not JSON
+MALFORMED: Final = object()  # what error_member gives for an error member it cannot read
+
+
+def load_json(text: str, **hooks: Any) -> Any:
+    """The decoded JSON, or NOT_JSON when the text is not JSON or nests deeper than the parser allows
+    (RecursionError). `hooks` go to `json.loads` (parse_int, parse_float, parse_constant)."""
+    try:
+        return json.loads(text, **hooks)
+    except (ValueError, RecursionError):
+        return NOT_JSON
+
+
+# The members the SDK reads by name: at the top level of a reply, an envelope or a frame, and inside its error object.
+# A member spelled in another letter case would be read by a case-insensitive decoder (Go's encoding/json) as the
+# real one, so a body holding one can be read two ways and is never judged
+_TOP_LEVEL = ('error', 'choices')
+_INSIDE_ERROR = ('message', 'type', 'code', 'request_id')
+
+
+def _has_case_variant(fields: Mapping[Any, Any], names: tuple[str, ...]) -> bool:
+    return any(isinstance(key, str) and key not in names and key.lower() in names for key in fields)
+
+
+def error_member(value: Any) -> dict[str, Any] | object | None:
+    """What a decoded reply or frame says through its top-level `error` member: None when it has none (absent or
+    null), the error object when it is one, and MALFORMED when it is anything else or a member the SDK reads comes in
+    a case variant (`Error`, `CHOICES`, or `Code` inside the error object). Nested content (such as
+    `choices[].delta`) is never inspected."""
+    # [1] Only an object has members; a case variant at the top level fails closed whatever the error member holds
+    if not isinstance(value, dict):
+        return None
+    top = cast('dict[str, Any]', value)
+    if _has_case_variant(top, _TOP_LEVEL):
+        return MALFORMED
+
+    # [2] No error, a readable error object, or something that cannot be read as one
+    error: Any = top.get('error')
+    if error is None:
+        return None
+    if not isinstance(error, dict) or _has_case_variant(cast('dict[str, Any]', error), _INSIDE_ERROR):
+        return MALFORMED
+    return cast('dict[str, Any]', error)
+
+
+def envelope_of(member: object) -> dict[str, Any] | None:
+    """An error member (from error_member) as the engine's envelope: its string fields (and a `retryable` of false)
+    when it has a string code and message; None for anything else."""
+    if not isinstance(member, dict):
+        return None
+    fields = cast('dict[str, Any]', member)
+    if not (isinstance(fields.get('code'), str) and isinstance(fields.get('message'), str)):
+        return None
+    kept: dict[str, Any] = {k: v for k, v in fields.items() if isinstance(v, str)}
+    if fields.get('retryable') is False:
+        kept['retryable'] = False
+    return kept
+
+
 def parse_envelope(text: str) -> dict[str, Any] | None:
     """The engine's `error` object, or None when the text is not Meridian's envelope."""
-    try:
-        value: Any = json.loads(text) if text else None
-    except (ValueError, RecursionError):  # RecursionError: a body nested deeper than the parser allows
-        return None
-    error: Any = cast('dict[str, Any]', value).get('error') if isinstance(value, dict) else None
-    if isinstance(error, dict):
-        fields = cast('dict[str, Any]', error)
-        if isinstance(fields.get('code'), str) and isinstance(fields.get('message'), str):
-            kept: dict[str, Any] = {k: v for k, v in fields.items() if isinstance(v, str)}
-            if fields.get('retryable') is False:
-                kept['retryable'] = False
-            return kept
-    return None
+    return envelope_of(error_member(load_json(text)))
 
 
 def error_from_envelope(error: Mapping[str, Any], status: int | None = None) -> MeridianError:
