@@ -173,6 +173,12 @@ class FakeEngine:
     def next(self, *answers: Scripted) -> None:
         self._queue.extend(answers)
 
+    def reset(self) -> None:
+        """Forget every recorded request, scripted answer and streamed body, as if the engine had just started."""
+        self.requests.clear()
+        self._queue.clear()
+        self._bodies.clear()
+
     def upstream_closed(self) -> bool:
         """True when the client has closed every streamed response it opened (and opened at least one)."""
         return bool(self._bodies) and all(body.closed for body in self._bodies)
