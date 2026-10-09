@@ -6,24 +6,28 @@ is seen by Django's own disconnect listener, which cancels the response while th
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import functools
 import gc
 import io
 import json
-from collections.abc import Callable, Iterator, Mapping
+import time
+from collections.abc import AsyncIterator, Callable, Iterator, Mapping
 from dataclasses import dataclass
 from typing import Any, cast
 
 import anyio
 import anyio.to_thread
 import django
+import httpx
 import pytest
 from asgiref.sync import sync_to_async
 from django.conf import settings
 from django.core.handlers.asgi import ASGIHandler
 from django.core.handlers.wsgi import WSGIHandler
 from django.http import HttpRequest, HttpResponseBase, HttpResponseRedirect, JsonResponse, StreamingHttpResponse
-from django.test import AsyncClient, AsyncRequestFactory, override_settings
+from django.test import AsyncClient, AsyncRequestFactory, RequestFactory, override_settings
 from django.urls import clear_url_caches, path
 
 from meridian import AsyncMeridian, Meridian
@@ -333,7 +337,9 @@ async def test_a_body_over_djangos_upload_limit_is_forwarded_by_the_asgi_view(en
 async def test_asgi_a_write_that_raises_mid_stream_still_closes_upstream(engine: Any) -> None:
     engine.next(Scripted(chunks=[*(frame(chunk(str(i))) for i in range(20)), frame('[DONE]')]))
     view = async_forward_view(authorize=allow, client=async_client(engine))
-    with pytest.raises(OSError, match='gone'):
+    # The shielded close waits on the event loop, where Django's disconnect listener cancels the response: the
+    # cancellation, raised once the close is over, then ends the response in place of the write's OSError
+    with contextlib.suppress(OSError):
         await asgi(view, body=STREAM, leave_after=1, raise_on_leave=True)
     assert engine.upstream_closed() and engine.parts_read() < 21
 
@@ -380,6 +386,96 @@ async def test_asgi_djangos_async_client_streams(engine: Any) -> None:
     body = b''.join([part async for part in response.streaming_content])
     assert response.status_code == 200 and body == (frame(chunk('b')) + frame('[DONE]')).encode()
     assert engine.upstream_closed()
+
+
+class HungClose(httpx.AsyncByteStream):
+    """An engine stream that keeps sending frames and whose close never returns (a connection that hangs on shutdown).
+    Its close notes the event loop it ran on."""
+
+    def __init__(self, *, hangs: bool = True) -> None:
+        self.hangs = hangs
+        self.closed_on: list[asyncio.AbstractEventLoop] = []
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        while True:
+            yield frame(chunk('a')).encode()
+            await anyio.sleep(0)
+
+    async def aclose(self) -> None:
+        self.closed_on.append(asyncio.get_running_loop())
+        if self.hangs:
+            await anyio.sleep_forever()
+
+
+def held_client(engine: Any, stream: HungClose) -> AsyncMeridian:
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(200, headers={'content-type': 'text/event-stream'}, stream=stream)
+    )
+    return AsyncMeridian(engine.public_url, engine.project_key, transport=transport, max_retries=0)
+
+
+async def held_response(engine: Any, stream: HungClose) -> HttpResponseBase:
+    request = untyped(AsyncRequestFactory()).post('/chat', data=STREAM, content_type='application/json')
+    return await async_forward_view(authorize=allow, client=held_client(engine, stream))(request)
+
+
+@pytest.mark.parametrize('leave_after', [0, 1])
+async def test_asgi_a_close_that_never_returns_is_given_up_within_the_bound(engine: Any, leave_after: int) -> None:
+    # Before the first byte (the response's close) and mid-stream (the stream's own end), through Django's handler
+    view = async_forward_view(authorize=allow, client=held_client(engine, HungClose()))
+    started = time.monotonic()
+    await asgi(view, body=STREAM, leave_after=leave_after)
+    assert time.monotonic() - started < 8  # the close is bounded at 5 s, the worker thread waits 6 s at most
+
+
+@pytest.mark.parametrize('started', [False, True])
+async def test_asgi_a_close_that_never_returns_is_given_up_from_djangos_worker_thread(
+    engine: Any, started: bool
+) -> None:
+    response = untyped(await held_response(engine, HungClose()))
+    parts = aiter(response)
+    if started:
+        await anext(parts)
+    began = time.monotonic()
+    with anyio.fail_after(8):
+        await sync_to_async(response.close)()  # how Django's ASGI handler closes a response
+        await parts.aclose()
+    assert time.monotonic() - began < 8
+
+
+async def test_asgi_close_from_a_foreign_thread_runs_on_the_requests_loop(engine: Any) -> None:
+    held = HungClose(hangs=False)
+    response = await held_response(engine, held)
+    with anyio.fail_after(8):
+        await anyio.to_thread.run_sync(response.close)  # a thread asgiref knows nothing about
+    assert held.closed_on == [asyncio.get_running_loop()]
+
+
+@pytest.mark.parametrize('kind', ['wsgi', 'asgi'])
+async def test_the_views_read_the_body_in_chunks(engine: Any, kind: str) -> None:
+    # A request.read(-1) would take the whole body at once, past the cap, before the core could refuse it
+    data = b'x' * (9 * MEBIBYTE)
+    factory = untyped(AsyncRequestFactory() if kind == 'asgi' else RequestFactory())
+    request = factory.post('/chat', data=data, content_type='application/json')
+    sizes: list[int] = []
+    got = 0
+    original = request.read
+
+    def read(size: int = -1) -> bytes:
+        nonlocal got
+        sizes.append(size)
+        piece: bytes = original(size)
+        got += len(piece)
+        return piece
+
+    request.read = read
+    if kind == 'asgi':
+        response = await async_forward_view(authorize=allow, client=async_client(engine))(request)
+    else:
+        response = forward_view(authorize=allow, client=sync_client(engine))(request)
+    assert response.status_code == 413 and engine.requests == []
+    assert sizes and all(0 < size <= 65536 for size in sizes)
+    assert got <= 8 * MEBIBYTE + 65536
 
 
 def test_the_async_view_under_wsgi_is_refused_not_buffered(engine: Any) -> None:

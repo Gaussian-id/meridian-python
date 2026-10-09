@@ -6,7 +6,18 @@ event loop for the async one), never one per request.
 
 `forward_view` is for WSGI and `async_forward_view` for ASGI. Under ASGI, Django would buffer the whole stream of the
 sync view before sending any of it; under WSGI, it would run the async view in a throwaway event loop and buffer the
-whole stream too, so the async view refuses to run there.
+whole stream too, so the async view refuses to run there. The sync view works from Django 4.2. The async view needs
+Django 5.0 or later to notice a browser that leaves mid-stream: Django 4.2's ASGI handler does not listen for
+`http.disconnect`, so there the engine's stream may be read to its end (and only then closed) after the browser left.
+
+The request body is read in chunks through the core's 8 MiB cap (413 past it). Under ASGI, Django's handler has
+already spooled the whole body to a temporary file before any view runs, so the cap bounds the memory the view uses,
+not the disk or bandwidth a large upload takes: set a body limit in the server or proxy in front of Django.
+
+The engine's stream is closed on every exit the server reports, within 5 seconds for a connection that hangs on close.
+One gap remains under WSGI: a middleware whose `process_response` raises after the view returned a stream drops the
+response before any server sees it, and nothing then closes the engine's stream (under ASGI the dropped response
+closes it). Keep such middleware from raising on streamed responses.
 
 Both views are CSRF-exempt by default: the route takes JSON only and answers anything else with 415 before
 `authorize` runs, so a cross-site page cannot send it without a CORS preflight, and `authorize` decides who may use
@@ -21,7 +32,6 @@ import inspect
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Iterator, Mapping
 from typing import Any, Protocol, TypeGuard, TypeVar
 
-from asgiref.sync import async_to_sync
 from django.conf import settings
 from django.core.handlers.wsgi import WSGIRequest
 from django.http import HttpRequest, HttpResponse, HttpResponseBase, JsonResponse, StreamingHttpResponse
@@ -139,13 +149,42 @@ def _response(reply: Reply[ReplyBody]) -> HttpResponseBase:
     return _headed(StreamingHttpResponse(reply.body, status=reply.status), reply)
 
 
+# How long closing the engine's stream may take (a hung connection must not hold the request), and how long a thread
+# that is not the event loop's waits for that close to finish there
+_CLOSE_WITHIN = 5
+_BRIDGE_WAIT = 6
+
 # Closes scheduled on an event loop, held until they finish (a task nothing refers to may be collected mid-way)
 _scheduled: set[asyncio.Task[None]] = set()
 
 
+async def _close_within(body: AsyncReplyBody) -> None:
+    """Close the body, shielded from the request's cancellation and given up after _CLOSE_WITHIN seconds (Django's
+    extra brings no anyio, so this is asyncio's `move_on_after(5, shield=True)`). A cancellation that arrived meanwhile
+    is raised once the close is over."""
+    # [1] The close runs as its own task, which a cancellation of this one does not reach
+    loop = asyncio.get_running_loop()
+    closing = loop.create_task(body.aclose())
+    deadline = loop.time() + _CLOSE_WITHIN
+    cancelled = False
+    while not closing.done() and (left := deadline - loop.time()) > 0:
+        try:
+            await asyncio.wait({closing}, timeout=left)
+        except asyncio.CancelledError:
+            cancelled = True
+
+    # [2] A close past the bound is given up; one that raised changes nothing (its error is read, never logged)
+    if not closing.done():
+        closing.cancel()
+    elif not closing.cancelled():
+        closing.exception()
+    if cancelled:
+        raise asyncio.CancelledError
+
+
 def _close_soon(body: AsyncReplyBody) -> None:
     """Close the body in a task of the running loop: for code on the loop's own thread, which cannot await it."""
-    task = asyncio.get_running_loop().create_task(body.aclose())
+    task = asyncio.get_running_loop().create_task(_close_within(body))
     _scheduled.add(task)
     task.add_done_callback(_scheduled.discard)
 
@@ -158,7 +197,7 @@ class _AsyncForwardedStream(StreamingHttpResponse):
     called nor registered with the response. So `__aiter__` closes the body however sending ends (finished, the
     browser gone, a failed write), and `close()` closes it when sending never started (the browser left before the
     first byte), on the event loop the body belongs to. When the server's very first write raises, Django runs
-    neither: the body is then closed on that loop once the response is dropped."""
+    neither: the body is then closed on that loop once the response is dropped. Each close is given up after 5 s."""
 
     _body: AsyncReplyBody
     _loop: asyncio.AbstractEventLoop
@@ -172,7 +211,7 @@ class _AsyncForwardedStream(StreamingHttpResponse):
 
     async def _aclose_body(self) -> None:
         self._closed = True
-        await self._body.aclose()
+        await _close_within(self._body)
 
     async def __aiter__(self) -> AsyncGenerator[bytes, None]:
         try:
@@ -188,16 +227,23 @@ class _AsyncForwardedStream(StreamingHttpResponse):
             await self._aclose_body()
 
     def close(self) -> None:
-        # [1] Django calls this from a worker thread (sync_to_async): the close runs on the request's own event loop.
-        #     Called on the loop's own thread (Django's AsyncClient does), it is scheduled there instead
+        # [1] The close always runs on the request's own event loop, never on a fresh one (the engine's connection
+        #     belongs to that loop). From a thread without a loop (Django's sync_to_async worker) it is waited for, at
+        #     most _BRIDGE_WAIT seconds; on a thread running a loop (the request's own, as with Django's AsyncClient)
+        #     it is scheduled, since a loop must never block. A loop that has stopped can no longer close it
         self._closed = True
         with contextlib.suppress(Exception):
             try:
-                asyncio.get_running_loop()
+                running: asyncio.AbstractEventLoop | None = asyncio.get_running_loop()
             except RuntimeError:
-                async_to_sync(self._body.aclose)()
-            else:
+                running = None
+            if running is self._loop:
                 _close_soon(self._body)
+            elif running is not None:
+                self._loop.call_soon_threadsafe(_close_soon, self._body)
+            elif self._loop.is_running():
+                closing = asyncio.run_coroutine_threadsafe(_close_within(self._body), self._loop)
+                closing.result(timeout=_BRIDGE_WAIT)
 
         # [2] Then Django's own close (its resources, and the request_finished signal)
         super().close()
@@ -275,7 +321,8 @@ def async_forward_view(
     the same long-lived one every time; by default the shared client for `settings.MERIDIAN` on the running loop.
 
     Django's ASGI handler reads the whole request body into a temporary file before any view runs; the view then reads
-    it in chunks through the core's 8 MiB cap."""
+    it in chunks through the core's 8 MiB cap (set a body limit in the server or proxy too). Noticing a browser that
+    leaves mid-stream needs Django 5.0 or later: 4.2's ASGI handler does not listen for it."""
     if inspect.iscoroutinefunction(client):
         raise TypeError(
             'client must be an AsyncMeridian, or a plain function returning one long-lived client: '

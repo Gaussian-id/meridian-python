@@ -218,7 +218,8 @@ async def test_a_close_that_never_returns_is_given_up_within_the_bound(engine: A
     app = FastAPI()
     app.post('/chat')(forward_route(authorize=allow, client=client))
     started = time.monotonic()
-    await drive(app, body=STREAM, leave_after=0)
+    with anyio.fail_after(8):  # a close that is not bounded fails here instead of hanging the suite
+        await drive(app, body=STREAM, leave_after=0)
     assert time.monotonic() - started < 8  # the close is shielded but bounded at 5 s
 
 

@@ -94,7 +94,7 @@ def forward_route(
     A streamed reply closes the engine's stream when it is sent, however sending ends. When FastAPI never sends it
     (a function-scoped yield dependency raising on exit, say), the stream is closed with the request's dependencies,
     on FastAPI versions that expose them to the request (`fastapi_inner_astack`, as the pinned version does); on
-    others it stays open until the reply is collected."""
+    others it may stay open, since nothing closes it, not even when the reply is collected."""
     if inspect.iscoroutinefunction(client):
         raise TypeError(
             'client must be an AsyncMeridian, or a plain function returning one long-lived client: '
