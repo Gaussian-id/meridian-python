@@ -12,11 +12,14 @@ import inspect
 from collections.abc import Awaitable, Callable
 from contextlib import AsyncExitStack
 
-import anyio  # comes with Starlette, which FastAPI is built on: no dependency of its own
-from fastapi import Request
-from fastapi.responses import Response, StreamingResponse
-from starlette.background import BackgroundTask
-from starlette.types import Receive, Scope, Send
+try:
+    import anyio  # comes with Starlette, which FastAPI is built on: no dependency of its own
+    from fastapi import Request
+    from fastapi.responses import Response, StreamingResponse
+    from starlette.background import BackgroundTask
+    from starlette.types import Receive, Scope, Send
+except ImportError as missing:
+    raise ImportError('meridian.fastapi needs FastAPI: install it with `pip install "meridian[fastapi]"`.') from missing
 
 from ._client import AsyncMeridian, async_shared_client
 from .forward import AllowRule, AsyncForwarder, AsyncReplyBody, Reply

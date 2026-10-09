@@ -34,6 +34,10 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/meridian"]
 
+# The sdist holds the package source and nothing else of the repository (no tests, scripts, specs or local files)
+[tool.hatch.build.targets.sdist]
+only-include = ["src/meridian", "README.md", "LICENSE"]
+
 [tool.ruff]
 line-length = 120
 target-version = "py310"

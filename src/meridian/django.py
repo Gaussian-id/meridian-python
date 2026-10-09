@@ -32,9 +32,12 @@ import inspect
 from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Iterator, Mapping
 from typing import Any, Protocol, TypeGuard, TypeVar
 
-from django.conf import settings
-from django.core.handlers.wsgi import WSGIRequest
-from django.http import HttpRequest, HttpResponse, HttpResponseBase, JsonResponse, StreamingHttpResponse
+try:
+    from django.conf import settings
+    from django.core.handlers.wsgi import WSGIRequest
+    from django.http import HttpRequest, HttpResponse, HttpResponseBase, JsonResponse, StreamingHttpResponse
+except ImportError as missing:
+    raise ImportError('meridian.django needs Django: install it with `pip install "meridian[django]"`.') from missing
 
 from ._client import AsyncMeridian, Meridian, async_shared_client, shared_client
 from .forward import AllowRule, AsyncForwarder, AsyncReplyBody, Forwarder, Reply, ReplyBody
