@@ -126,12 +126,19 @@ def completion(content: str = 'hello', model: str = 'gemini-3.8-flash', **usage:
 class _Body(httpx.SyncByteStream, httpx.AsyncByteStream):
     def __init__(self, parts: list[bytes], drop_after: int | None, hang: bool) -> None:
         self._parts, self._drop_after, self._hang = parts, drop_after, hang
+        self.closed = False  # the upstream connection was closed by the client
 
     def __iter__(self) -> Iterator[bytes]:
         for i, part in enumerate(self._parts):
             if self._drop_after is not None and i >= self._drop_after:
                 raise httpx.ReadError('connection dropped')
             yield part
+
+    def close(self) -> None:
+        self.closed = True
+
+    async def aclose(self) -> None:
+        self.closed = True
 
     async def __aiter__(self) -> AsyncIterator[bytes]:
         for i, part in enumerate(self._parts):
@@ -152,10 +159,15 @@ class FakeEngine:
     def __init__(self) -> None:
         self.requests: list[httpx.Request] = []
         self._queue: list[Scripted] = []
+        self._bodies: list[_Body] = []
         self.transport = httpx.MockTransport(self._handle)
 
     def next(self, *answers: Scripted) -> None:
         self._queue.extend(answers)
+
+    def upstream_closed(self) -> bool:
+        """True when the client has closed every streamed response it opened (and opened at least one)."""
+        return bool(self._bodies) and all(body.closed for body in self._bodies)
 
     def bodies(self) -> list[Any]:
         return [json.loads(r.content) if r.content else None for r in self.requests]
@@ -175,9 +187,9 @@ class FakeEngine:
         if answer.chunks is not None:
             parts = [c.encode() if isinstance(c, str) else c for c in answer.chunks]
             headers.setdefault('content-type', 'text/event-stream')
-            return httpx.Response(
-                answer.status, headers=headers, stream=_Body(parts, answer.drop_after, answer.hang), request=request
-            )
+            body = _Body(parts, answer.drop_after, answer.hang)
+            self._bodies.append(body)
+            return httpx.Response(answer.status, headers=headers, stream=body, request=request)
         if answer.json is not None:
             headers.setdefault('content-type', 'application/json')
             return httpx.Response(

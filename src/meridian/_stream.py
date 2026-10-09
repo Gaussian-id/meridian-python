@@ -3,13 +3,13 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncGenerator, AsyncIterator, Generator, Iterator, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Literal, cast
 
 import httpx
 
 from ._errors import Err, MeridianError, Ok, Result, client_error, error_from_envelope, parse_envelope
-from ._sse import EventDecoder
+from ._sse import EventDecoder, EventTooLarge
 
 USAGE_KEYS = ('prompt_tokens', 'completion_tokens', 'total_tokens')
 _STREAM_FAILURES = (httpx.HTTPError, httpx.StreamError)
@@ -34,7 +34,8 @@ class ChatChunk:
 class _State:
     """The shared reading logic: one event in, a chunk / skip / done out, with the verdict kept on the side."""
 
-    def __init__(self) -> None:
+    def __init__(self, request_id: str | None) -> None:
+        self.request_id = request_id  # the response header's id, for an error frame that carries none
         self.error: MeridianError | None = None
         self.usage: dict[str, int] | None = None
         self.consumed = False
@@ -47,13 +48,16 @@ class _State:
             return 'done'
         envelope = parse_envelope(data)
         if envelope is not None:
-            self.error = error_from_envelope(envelope)
+            error = error_from_envelope(envelope)
+            self.error = (
+                error if error.request_id or not self.request_id else replace(error, request_id=self.request_id)
+            )
             return 'done'
 
         # [2] Anything else must be a chat chunk
         try:
             raw: Any = json.loads(data)
-        except ValueError:
+        except (ValueError, RecursionError):
             self.error = client_error('network_error', 'The stream sent a frame that is not valid JSON.')
             return 'done'
         if not isinstance(raw, dict) or not isinstance(raw.get('choices'), list):  # pyright: ignore[reportUnknownMemberType]
@@ -73,7 +77,12 @@ class _State:
         return ChatChunk(content if isinstance(content, str) else '', chunk)
 
     def abort(self, message: str) -> None:
-        self.error = client_error('aborted', message)
+        """Record `aborted`, unless the stream already ended with a verdict of its own."""
+        if self.error is None:
+            self.error = client_error('aborted', message)
+
+    def too_large(self) -> None:
+        self.error = client_error('network_error', 'The stream sent an event larger than 16 MiB.')
 
     def failed(self) -> None:
         """The connection broke while reading: aborted if the caller cancelled, otherwise a network error."""
@@ -85,11 +94,23 @@ class _State:
     def begin(self) -> bool:
         """True when this read may proceed; a second read of an unfinished stream is recorded as aborted."""
         if self.consumed:
-            if not self.finished and self.error is None:
+            if not self.finished:
                 self.abort('This stream was already read.')
             return False
         self.consumed = True
         return True
+
+    def cancel(self) -> None:
+        self.cancelled = True
+        self.consumed = True
+        if not self.finished:
+            self.abort('The stream was cancelled.')
+
+    def settle(self, ended: bool) -> None:
+        """A read is over. One that stopped before the end (the caller left the loop) is aborted, never silent."""
+        if not ended:
+            self.abort('The stream was closed before it finished.')
+        self.finished = True
 
     def result(self, text: str) -> Result[str]:
         return Err(self.error) if self.error else Ok(text)
@@ -105,7 +126,7 @@ class ChatStream:
 
     def __init__(self, response: httpx.Response) -> None:
         self._response = response
-        self._state = _State()
+        self._state = _State(response.headers.get('x-request-id'))
 
     @property
     def error(self) -> MeridianError | None:
@@ -117,15 +138,11 @@ class ChatStream:
 
     @property
     def request_id(self) -> str | None:
-        return self._response.headers.get('x-request-id')
+        return self._state.request_id
 
     def cancel(self) -> None:
-        # [1] The caller's own doing: aborted, and nothing reads the body afterwards
-        state = self._state
-        state.cancelled = True
-        if not state.consumed:
-            state.consumed = True
-            state.abort('The stream was cancelled.')
+        # The caller's own doing: aborted (unless already finished), and nothing reads the body afterwards
+        self._state.cancel()
         self._response.close()
 
     def _events(self) -> Generator[str, None, None]:
@@ -152,18 +169,20 @@ class ChatStream:
                     yield out
                     if state.cancelled:  # cancel() during iteration: stop now, never read further
                         ended = True
-                        state.abort('The stream was cancelled.')
                         return
 
             # [3] A body that ended without [DONE] lost its connection
             ended = True
             state.error = client_error('network_error', 'The stream ended before it finished.')
+        except EventTooLarge:
+            ended = True
+            state.too_large()
         except _STREAM_FAILURES:
             ended = True
             state.failed()
         finally:
-            # [4] Done or stopped early: close, which cancels upstream if the body is unfinished
-            state.finished = ended
+            # [4] Done or abandoned: settle the verdict, then close, which cancels upstream if the body is unfinished
+            state.settle(ended)
             events.close()
             self._response.close()
 
@@ -171,17 +190,28 @@ class ChatStream:
         return self._state.result(''.join(c.delta for c in self))
 
     def iter_bytes(self) -> Iterator[bytes]:
-        """The engine's events byte for byte, once: for forwarding to a browser."""
+        """The engine's events byte for byte (content-decoding undone), once: for forwarding to a browser."""
+        # [1] A stream is read once
         state = self._state
         if state.consumed:
             yield _already_read_frame()
             return
         state.consumed = True
+        ended = False
         try:
-            yield from self._response.iter_raw()
+            # [2] Hand every piece over, stopping at once if the caller cancels meanwhile
+            for piece in self._response.iter_bytes():
+                yield piece
+                if state.cancelled:
+                    ended = True
+                    return
+            ended = True
         except _STREAM_FAILURES:
+            ended = True
             state.failed()
         finally:
+            # [3] Finished, broken or abandoned: settle the verdict and close upstream
+            state.settle(ended)
             self._response.close()
 
 
@@ -190,7 +220,7 @@ class AsyncChatStream:
 
     def __init__(self, response: httpx.Response) -> None:
         self._response = response
-        self._state = _State()
+        self._state = _State(response.headers.get('x-request-id'))
 
     @property
     def error(self) -> MeridianError | None:
@@ -202,14 +232,10 @@ class AsyncChatStream:
 
     @property
     def request_id(self) -> str | None:
-        return self._response.headers.get('x-request-id')
+        return self._state.request_id
 
     async def cancel(self) -> None:
-        state = self._state
-        state.cancelled = True
-        if not state.consumed:
-            state.consumed = True
-            state.abort('The stream was cancelled.')
+        self._state.cancel()
         await self._response.aclose()
 
     async def _events(self) -> AsyncGenerator[str, None]:
@@ -238,22 +264,25 @@ class AsyncChatStream:
                     yield out
                     if state.cancelled:  # cancel() during iteration: stop now, never read further
                         ended = True
-                        state.abort('The stream was cancelled.')
                         return
 
             # [3] A body that ended without [DONE] lost its connection
             ended = True
             state.error = client_error('network_error', 'The stream ended before it finished.')
+        except EventTooLarge:
+            ended = True
+            state.too_large()
         except asyncio.CancelledError:
             # [4] The task was cancelled: record aborted, close upstream (in finally), and let it propagate
-            ended = True
             state.abort('The stream was aborted.')
             raise
         except _STREAM_FAILURES:
             ended = True
             state.failed()
         finally:
-            state.finished = ended
+            # [5] Done or abandoned (an abandoned async generator is closed by the event loop's finaliser,
+            # which is what ends a task cancelled in the consumer's own loop body): settle, then close upstream
+            state.settle(ended)
             await events.aclose()
             await self._response.aclose()
 
@@ -261,16 +290,29 @@ class AsyncChatStream:
         return self._state.result(''.join([c.delta async for c in self]))
 
     async def aiter_bytes(self) -> AsyncIterator[bytes]:
-        """The engine's events byte for byte, once: for forwarding to a browser."""
+        """The engine's events byte for byte (content-decoding undone), once: for forwarding to a browser."""
+        # [1] A stream is read once
         state = self._state
         if state.consumed:
             yield _already_read_frame()
             return
         state.consumed = True
+        ended = False
         try:
-            async for piece in self._response.aiter_raw():
+            # [2] Hand every piece over, stopping at once if the caller cancels meanwhile
+            async for piece in self._response.aiter_bytes():
                 yield piece
+                if state.cancelled:
+                    ended = True
+                    return
+            ended = True
+        except asyncio.CancelledError:
+            state.abort('The stream was aborted.')
+            raise
         except _STREAM_FAILURES:
+            ended = True
             state.failed()
         finally:
+            # [3] Finished, broken or abandoned: settle the verdict and close upstream
+            state.settle(ended)
             await self._response.aclose()

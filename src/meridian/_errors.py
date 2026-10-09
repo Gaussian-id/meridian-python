@@ -117,7 +117,7 @@ def parse_envelope(text: str) -> dict[str, Any] | None:
     """The engine's `error` object, or None when the text is not Meridian's envelope."""
     try:
         value: Any = json.loads(text) if text else None
-    except ValueError:
+    except (ValueError, RecursionError):  # RecursionError: a body nested deeper than the parser allows
         return None
     error: Any = cast('dict[str, Any]', value).get('error') if isinstance(value, dict) else None
     if isinstance(error, dict):

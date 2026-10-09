@@ -1,5 +1,7 @@
 import asyncio
+import gzip
 import json
+from collections.abc import Callable
 from typing import Any
 
 import pytest
@@ -30,12 +32,22 @@ async def open_stream(mode: str, engine: Any, *parts: Any, **scripted: Any) -> A
     return result.data
 
 
+async def eventually(check: Callable[[], bool]) -> None:
+    """Lets the event loop run its pending finalisers (an abandoned async generator is closed in a task)."""
+    for _ in range(50):
+        if check():
+            return
+        await asyncio.sleep(0)
+    raise AssertionError('the stream was never settled')
+
+
 async def test_streams_text_and_usage(mode: str, engine: Any) -> None:
     s = await open_stream(
         mode, engine, frame(chunk('Hel')), frame(chunk('lo')), frame(usage_chunk(3, 2)), frame('[DONE]')
     )
     assert await collect(s) == ['Hel', 'lo']
     assert s.error is None and s.usage == {'prompt_tokens': 3, 'completion_tokens': 2, 'total_tokens': 5}
+    assert engine.upstream_closed()
 
 
 async def test_always_asks_for_usage_and_streaming(mode: str, engine: Any) -> None:
@@ -50,11 +62,21 @@ async def test_always_asks_for_usage_and_streaming(mode: str, engine: Any) -> No
 
 
 async def test_frames_split_anywhere_arrive_intact(mode: str, engine: Any) -> None:
+    # One CRLF event whose data field has two lines, with the emoji in the second. The wire is cut
+    # between the CR and LF of the first line, inside the 4-byte emoji (1+3), and between the CR and LF
+    # of the closing blank line, so each of those splits really happens.
     emoji = 'Halo 😀 selamat'
-    wire = (raw_frame(chunk(emoji)) + frame(chunk('ok')) + frame('[DONE]')).replace('\n', '\r\n').encode()
-    cut = wire.index('😀'.encode()) + 1  # split inside the 4-byte emoji
-    cr = wire.index(b'\r\n\r\n') + 1  # split between CR and LF
-    parts = [wire[:cr], wire[cr:cut], wire[cut:]]
+    head, tail = json.dumps(chunk(emoji), ensure_ascii=False).split(', "choices"')
+    first = f'data: {head},\r\ndata: "choices"{tail}\r\n\r\n'
+    wire = (first + frame(chunk('ok')).replace('\n', '\r\n') + frame('[DONE]').replace('\n', '\r\n')).encode()
+    c1 = wire.index(b'\r\n') + 1
+    e = wire.index('😀'.encode()) + 1
+    c2 = wire.index(b'\r\n\r\n') + 3
+    assert c1 < e < c2
+    parts = [wire[:c1], wire[c1:e], wire[e:c2], wire[c2:]]
+    assert b''.join(parts) == wire
+    assert parts[0].endswith(b'\r') and parts[1].endswith(b'\xf0') and parts[2].startswith(b'\x9f\x98\x80')
+    assert parts[2].endswith(b'\r') and parts[3].startswith(b'\n')
     s = await open_stream(mode, engine, *parts)
     assert await collect(s) == [emoji, 'ok'] and s.error is None
 
@@ -81,16 +103,52 @@ async def test_comment_lines_are_ignored(mode: str, engine: Any) -> None:
     assert await collect(s) == ['a'] and s.error is None
 
 
+async def test_a_leading_byte_order_mark_is_ignored(mode: str, engine: Any) -> None:
+    wire = b'\xef\xbb\xbf' + frame(chunk('a')).encode() + frame('[DONE]').encode()
+    s = await open_stream(mode, engine, wire[:1], wire[1:])  # the BOM itself split across reads
+    assert await collect(s) == ['a'] and s.error is None
+
+
+async def test_a_large_event_under_the_cap_arrives_whole(mode: str, engine: Any) -> None:
+    big = 'y' * (1 << 20)
+    wire = (frame(chunk(big)) + frame('[DONE]')).encode()
+    s = await open_stream(mode, engine, *[wire[i : i + 4096] for i in range(0, len(wire), 4096)])
+    assert await collect(s) == [big] and s.error is None
+
+
+async def test_an_oversized_event_fails_closed(mode: str, engine: Any) -> None:
+    huge = b'data: ' + b'x' * (17 * 1024 * 1024)  # never terminated: the cap trips before any later event is read
+    s = await open_stream(mode, engine, huge, frame(chunk('late')), frame('[DONE]'))
+    assert await collect(s) == []
+    assert s.error.code == 'network_error' and '16 MiB' in s.error.message
+    assert engine.upstream_closed()
+
+
 async def test_a_mid_stream_error_frame_ends_with_that_error(mode: str, engine: Any) -> None:
     s = await open_stream(mode, engine, frame(chunk('a')), frame(envelope('upstream_error')))
     assert await collect(s) == ['a']
     assert (s.error.code, s.error.status) == ('upstream_error', 502)
+    assert engine.upstream_closed()
+
+
+async def test_an_error_frame_without_a_request_id_takes_the_header_one(mode: str, engine: Any) -> None:
+    bare = {'error': {'message': 'boom', 'type': 'api_error', 'code': 'upstream_error'}}
+    s = await open_stream(mode, engine, frame(bare), headers={'x-request-id': 'req_header'})
+    await collect(s)
+    assert s.error.code == 'upstream_error' and s.error.request_id == 'req_header'
+
+
+async def test_an_error_frame_keeps_its_own_request_id(mode: str, engine: Any) -> None:
+    s = await open_stream(mode, engine, frame(envelope('upstream_error', 'req_frame')), headers={'x-request-id': 'h'})
+    await collect(s)
+    assert s.error.request_id == 'req_frame'
 
 
 async def test_a_dropped_connection_is_a_network_error_never_success(mode: str, engine: Any) -> None:
     s = await open_stream(mode, engine, frame(chunk('a')), frame(chunk('b')), drop_after=1)
     text = await resolve(s.text())
     assert text.error.code == 'network_error'
+    assert engine.upstream_closed()
 
 
 async def test_a_body_that_ends_without_done_is_a_network_error(mode: str, engine: Any) -> None:
@@ -99,9 +157,17 @@ async def test_a_body_that_ends_without_done_is_a_network_error(mode: str, engin
 
 
 async def test_a_malformed_frame_is_a_network_error(mode: str, engine: Any) -> None:
-    s = await open_stream(mode, engine, frame('{not json'))
-    await collect(s)
+    s = await open_stream(mode, engine, frame('{not json'), frame(chunk('late')), frame('[DONE]'))
+    assert await collect(s) == []
     assert s.error.code == 'network_error' and 'valid JSON' in s.error.message
+    assert engine.upstream_closed()
+
+
+async def test_a_frame_nested_too_deep_to_parse_is_a_network_error(mode: str, engine: Any) -> None:
+    s = await open_stream(mode, engine, frame('[' * 100_000), frame('[DONE]'))
+    assert await collect(s) == []
+    assert s.error.code == 'network_error' and 'valid JSON' in s.error.message
+    assert engine.upstream_closed()
 
 
 async def test_a_stream_reads_once(mode: str, engine: Any) -> None:
@@ -125,6 +191,50 @@ async def test_cancel_mid_stream_ends_as_aborted(mode: str, engine: Any) -> None
             seen.append(c.delta)
             await s.cancel()
     assert seen == ['a'] and (s.error.code, s.error.retryable) == ('aborted', False)
+    assert engine.upstream_closed()
+
+
+async def test_break_then_cancel_ends_as_aborted(mode: str, engine: Any) -> None:
+    s = await open_stream(mode, engine, frame(chunk('a')), frame(chunk('b')), frame('[DONE]'))
+    if mode == 'sync':
+        for _ in s:
+            break
+        s.cancel()
+    else:
+        async for _ in s:
+            break
+        await s.cancel()
+    assert s.error.code == 'aborted'
+    assert engine.upstream_closed()
+
+
+async def test_cancel_while_the_iterator_is_still_open_ends_as_aborted(mode: str, engine: Any) -> None:
+    s = await open_stream(mode, engine, frame(chunk('a')), frame(chunk('b')), frame('[DONE]'))
+    if mode == 'sync':
+        it = iter(s)
+        next(it)
+        s.cancel()
+        it.close()
+    else:
+        ait = s.__aiter__()
+        await ait.__anext__()
+        await s.cancel()
+        await ait.aclose()
+    assert s.error.code == 'aborted'
+    assert engine.upstream_closed()
+
+
+async def test_abandoning_the_loop_closes_upstream_and_records_aborted(mode: str, engine: Any) -> None:
+    s = await open_stream(mode, engine, frame(chunk('a')), frame(chunk('b')), frame('[DONE]'))
+    if mode == 'sync':
+        for _ in s:
+            break
+    else:
+        async for _ in s:
+            break
+    await eventually(lambda: s.error is not None and engine.upstream_closed())
+    assert s.error.code == 'aborted'
+    assert await collect(s) == []
 
 
 async def test_a_refusal_before_streaming_is_an_error_value(mode: str, engine: Any) -> None:
@@ -138,6 +248,49 @@ async def test_iter_bytes_passes_the_engine_bytes_unchanged(mode: str, engine: A
     s = await open_stream(mode, engine, wire)
     data = b''.join(s.iter_bytes()) if mode == 'sync' else b''.join([b async for b in s.aiter_bytes()])
     assert data == wire.encode()
+    assert engine.upstream_closed()
+
+
+async def test_iter_bytes_hands_over_decoded_bytes_of_a_compressed_response(mode: str, engine: Any) -> None:
+    wire = frame(chunk('a')) + frame('[DONE]')
+    packed = gzip.compress(wire.encode())
+    s = await open_stream(mode, engine, packed[:10], packed[10:], headers={'content-encoding': 'gzip'})
+    data = b''.join(s.iter_bytes()) if mode == 'sync' else b''.join([b async for b in s.aiter_bytes()])
+    assert data == wire.encode()
+
+
+async def test_a_compressed_response_still_parses(mode: str, engine: Any) -> None:
+    packed = gzip.compress((frame(chunk('a')) + frame('[DONE]')).encode())
+    s = await open_stream(mode, engine, packed[:10], packed[10:], headers={'content-encoding': 'gzip'})
+    assert await collect(s) == ['a'] and s.error is None
+
+
+async def test_a_fully_forwarded_stream_is_finished(mode: str, engine: Any) -> None:
+    s = await open_stream(mode, engine, frame(chunk('a')), frame('[DONE]'))
+    _ = b''.join(s.iter_bytes()) if mode == 'sync' else b''.join([b async for b in s.aiter_bytes()])
+    assert await collect(s) == [] and s.error is None  # the finished result, not "already read"
+
+
+async def test_cancel_during_iter_bytes_stops_and_records_aborted(mode: str, engine: Any) -> None:
+    s = await open_stream(mode, engine, b'data: a\n\n', b'data: b\n\n', b'data: c\n\n')
+    seen: list[bytes] = []
+    if mode == 'sync':
+        for piece in s.iter_bytes():
+            seen.append(piece)
+            s.cancel()
+    else:
+        async for piece in s.aiter_bytes():
+            seen.append(piece)
+            await s.cancel()
+    assert seen == [b'data: a\n\n'] and s.error.code == 'aborted'
+    assert engine.upstream_closed()
+
+
+async def test_a_broken_body_during_iter_bytes_is_recorded(mode: str, engine: Any) -> None:
+    s = await open_stream(mode, engine, b'data: a\n\n', b'data: b\n\n', drop_after=1)
+    data = b''.join(s.iter_bytes()) if mode == 'sync' else b''.join([b async for b in s.aiter_bytes()])
+    assert data == b'data: a\n\n' and s.error.code == 'network_error'
+    assert engine.upstream_closed()
 
 
 async def test_cancelling_the_task_closes_upstream_and_records_aborted(engine: Any) -> None:
@@ -158,4 +311,28 @@ async def test_cancelling_the_task_closes_upstream_and_records_aborted(engine: A
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
+    assert stream.error is not None and stream.error.code == 'aborted'
+    assert engine.upstream_closed()
+
+
+async def test_cancelling_the_task_inside_the_loop_body_records_aborted(engine: Any) -> None:
+    engine.next(Scripted(chunks=[frame(chunk('a')), frame(chunk('b')), frame('[DONE]')]))
+    result = await AsyncMeridian(engine.public_url, engine.project_key, transport=engine.transport).chat.stream(
+        {'messages': MSG}
+    )
+    stream = result.data
+    assert stream is not None
+    started = asyncio.Event()
+
+    async def consume() -> None:
+        async for _ in stream:
+            started.set()
+            await asyncio.sleep(3600)  # the cancellation lands here, outside the stream's own awaits
+
+    task = asyncio.create_task(consume())
+    await started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    await eventually(lambda: stream.error is not None and engine.upstream_closed())
     assert stream.error is not None and stream.error.code == 'aborted'
