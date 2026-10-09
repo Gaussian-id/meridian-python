@@ -1,6 +1,6 @@
-"""Contract run against the real local engine. It refuses on a paid provider key, a path outside the runtime folder or
-a non-loopback URL; it never prints a value. The real run is deferred by the owner: this script only refuses, or
-launches the suite when the guard allows it.
+"""Contract run against the real local engine. It refuses on a paid provider key, a path outside the runtime folder,
+a non-loopback URL or a proxy; it never prints a value. The real run is deferred by the owner: this script only
+refuses, or launches the suite when the guard allows it.
 
     uv run python scripts/contract.py
 """
@@ -18,8 +18,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from tests.support.contract_guard import DEFAULT_URLS, refusal, runtime_dir  # noqa: E402
 
-COMMAND = ['uv', 'run', 'pytest', '-m', 'not fake_only']
-LOOPBACK_HOSTS = '127.0.0.1,localhost,::1'
+# --frozen: never resolve or sync from an index; --no-env-file: neither a .env file nor UV_ENV_FILE adds variables
+COMMAND = ['uv', 'run', '--frozen', '--no-env-file', 'pytest', '-m', 'not fake_only']
 
 
 def ready_endpoint(public_url: str) -> str:
@@ -61,12 +61,9 @@ def main(
         print('Contract run refused: the local engine is not ready (or did not answer in 5 s).', file=sys.stderr)
         return 1
 
-    # [3] The same suite, in contract mode, against the engine; no proxy may sit between the suite and it
+    # [3] The same suite, in contract mode, against the engine. The guard found no proxy; NO_PROXY=* keeps it so
     runtime = environ.get('MERIDIAN_RUNTIME_DIR') or str(runtime_dir(environ))
-    child = {
-        key: value for key, value in environ.items() if key.upper() not in ('HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY')
-    }
-    child.update(MERIDIAN_CONTRACT='1', MERIDIAN_RUNTIME_DIR=runtime, NO_PROXY=LOOPBACK_HOSTS, no_proxy=LOOPBACK_HOSTS)
+    child = {**environ, 'MERIDIAN_CONTRACT': '1', 'MERIDIAN_RUNTIME_DIR': runtime, 'NO_PROXY': '*', 'no_proxy': '*'}
     return int(runner(COMMAND, env=child, cwd=str(ROOT)))
 
 

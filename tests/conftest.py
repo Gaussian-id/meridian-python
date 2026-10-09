@@ -18,8 +18,8 @@ def mode(request: pytest.FixtureRequest) -> str:
 
 
 @pytest.fixture
-def engine() -> Any:
-    return make_engine()
+def engine(request: pytest.FixtureRequest) -> Any:
+    return make_engine(request.node)  # pyright: ignore[reportUnknownMemberType]
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
@@ -31,13 +31,17 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
             + ', '.join(unmarked)
         )
 
-    # [2] fake_only tests are skipped against the real engine, contract tests when there is none
-    skip_fake = pytest.mark.skip(reason='needs the in-memory fake engine')
+    # [2] Against the real engine, fake_only tests are not collected at all (a skip mark could be switched off with
+    #     `-p no:skipping`); without it, contract tests are skipped
+    if CONTRACT:
+        fake = [item for item in items if 'fake_only' in item.keywords]
+        if fake:
+            config.hook.pytest_deselected(items=fake)
+            items[:] = [item for item in items if item not in fake]
+        return
     skip_real = pytest.mark.skip(reason='needs the real local engine: run scripts/contract.py')
     for item in items:
-        if CONTRACT and 'fake_only' in item.keywords:
-            item.add_marker(skip_fake)
-        elif not CONTRACT and 'contract' in item.keywords:
+        if 'contract' in item.keywords:
             item.add_marker(skip_real)
 
 

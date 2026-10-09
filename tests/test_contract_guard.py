@@ -1,6 +1,7 @@
 import os
 import subprocess
 import sys
+import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +25,12 @@ ROOT = Path(__file__).resolve().parents[1]
 GEMINI = 'GAUSSMERIDIAN_GEMINI_API_KEY'
 OPENROUTER = 'GAUSSMERIDIAN_OPENROUTER_API_KEY'
 SECRET = 'v' + 'q' * 24  # a stand-in value, built at run time; no message may ever contain it
+
+
+@pytest.fixture(autouse=True)
+def no_system_proxy(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The guard asks the system for proxies (registry on Windows); a test must not depend on this machine's."""
+    monkeypatch.setattr(urllib.request, 'getproxies', lambda: dict[str, str]())
 
 
 # -- the env file text ---------------------------------------------------------------------------------------------
@@ -56,6 +63,35 @@ SECRET = 'v' + 'q' * 24  # a stand-in value, built at run time; no message may e
         # any line that sets it counts, even if a later one empties it
         ('GAUSSMERIDIAN_GEMINI_API_KEY=abc\nGAUSSMERIDIAN_GEMINI_API_KEY=\n', [GEMINI]),
         (f'{OPENROUTER}=a\n{GEMINI}=b\n{OPENROUTER}=c', [OPENROUTER, GEMINI]),
+        # compose breaks lines on \n only and skips \r after `=`; local-up.ps1 also breaks on \r: a name set under
+        # either reading is set
+        ('GAUSSMERIDIAN_GEMINI_API_KEY=   \rVAL', [GEMINI]),
+        ('GAUSSMERIDIAN_GEMINI_API_KEY=\rVAL', [GEMINI]),
+        ('GAUSSMERIDIAN_GEMINI_API_KEY=\r"VAL"', [GEMINI]),
+        ('GAUSSMERIDIAN_GEMINI_API_KEY=\r#VAL', [GEMINI]),
+        ('GAUSSMERIDIAN_GEMINI_API_KEY=\rA=1', [GEMINI]),
+        ('GAUSSMERIDIAN_GEMINI_API_KEY\r=VAL', [GEMINI]),
+        ('export\rGAUSSMERIDIAN_GEMINI_API_KEY=VAL', [GEMINI]),
+        # a quoted empty value is followed by a new statement on the same line (compose)
+        ('GAUSSMERIDIAN_GEMINI_API_KEY=""GAUSSMERIDIAN_GEMINI_API_KEY=VAL', [GEMINI]),
+        ('A="" GAUSSMERIDIAN_OPENROUTER_API_KEY=VAL', [OPENROUTER]),
+        ("A='' GAUSSMERIDIAN_OPENROUTER_API_KEY=VAL", [OPENROUTER]),
+        ('A="x\nline" GAUSSMERIDIAN_OPENROUTER_API_KEY=VAL', [OPENROUTER]),
+        ('A="x" GAUSSMERIDIAN_OPENROUTER_API_KEY=VAL', [OPENROUTER]),
+        ('A="a\\" GAUSSMERIDIAN_OPENROUTER_API_KEY=VAL', [OPENROUTER]),
+        ('A="x\nGAUSSMERIDIAN_OPENROUTER_API_KEY=VAL\n"', [OPENROUTER]),
+        # blank is space, tab, VT, FF and CR; every other character is a value (Python's \s would call \x1c blank)
+        ('GAUSSMERIDIAN_GEMINI_API_KEY=\x1c', [GEMINI]),
+        ('GAUSSMERIDIAN_GEMINI_API_KEY=\x1c\n', [GEMINI]),
+        ('GAUSSMERIDIAN_GEMINI_API_KEY=\x85', [GEMINI]),
+        ('GAUSSMERIDIAN_GEMINI_API_KEY=\xa0', [GEMINI]),
+        ('GAUSSMERIDIAN_GEMINI_API_KEY=\N{LINE SEPARATOR}', [GEMINI]),
+        ('GAUSSMERIDIAN_GEMINI_API_KEY=\N{ZERO WIDTH SPACE}', [GEMINI]),
+        ('GAUSSMERIDIAN_GEMINI_API_KEY=\N{ZERO WIDTH NO-BREAK SPACE}', [GEMINI]),
+        ('GAUSSMERIDIAN_GEMINI_API_KEY=\vVAL', [GEMINI]),
+        ('GAUSSMERIDIAN_GEMINI_API_KEY=${UNSET:-VAL}', [GEMINI]),
+        ('GAUSSMERIDIAN_GEMINI_API_KEY=$X', [GEMINI]),
+        ('GAUSSMERIDIAN_GEMINI_API_KEY="\r"', [GEMINI]),
         # not keys
         ('# GAUSSMERIDIAN_GEMINI_API_KEY=abc', []),
         ('   # export GAUSSMERIDIAN_GEMINI_API_KEY=abc', []),
@@ -68,6 +104,13 @@ SECRET = 'v' + 'q' * 24  # a stand-in value, built at run time; no message may e
         ('set GAUSSMERIDIAN_GEMINI_API_KEY=', []),
         ('set "GAUSSMERIDIAN_GEMINI_API_KEY="', []),
         ('export GAUSSMERIDIAN_GEMINI_API_KEY', []),
+        ('GAUSSMERIDIAN_GEMINI_API_KEY=\v\n', []),
+        ('GAUSSMERIDIAN_GEMINI_API_KEY=\f', []),
+        ('GAUSSMERIDIAN_GEMINI_API_KEY= \t\v\f\r \r\n', []),
+        ('GAUSSMERIDIAN_GEMINI_API_KEY=\r\nA=1', []),
+        ('GAUSSMERIDIAN_GEMINI_API_KEY=\r\r\n', []),
+        ('A=""\nGAUSSMERIDIAN_GEMINI_API_KEY=""\n# GAUSSMERIDIAN_GEMINI_API_KEY=abc', []),
+        ('A="x" # GAUSSMERIDIAN_OPENROUTER_API_KEY=VAL', []),
         ('XGAUSSMERIDIAN_GEMINI_API_KEY=abc', []),
         ('GAUSSMERIDIAN_GEMINI_API_KEY_OTHER=abc', []),
         ('GAUSSMERIDIAN_DB_PASSWORD=abc', []),
@@ -292,12 +335,27 @@ def test_both_sources_are_named_together(tmp_path: Path) -> None:
     assert SECRET not in message
 
 
-def test_a_missing_or_unreadable_env_file_is_a_refusal(tmp_path: Path) -> None:
+def test_a_missing_env_file_is_a_refusal_that_says_it_is_missing(tmp_path: Path) -> None:
     folder = tmp_path / 'Gaussian' / 'MeridianEngine'
     folder.mkdir(parents=True)
-    assert refusal({'LOCALAPPDATA': str(tmp_path)}) is not None
+    message = refusal({'LOCALAPPDATA': str(tmp_path)})
+    assert message is not None
+    assert 'missing' in message
+    assert 'UTF-8' not in message
+    # the file the engine would read is the override when there is one
+    (folder / 'meridian-engine.env').write_text('A=1\n', encoding='utf-8')
+    message = refusal({'LOCALAPPDATA': str(tmp_path), 'GAUSSMERIDIAN_ENV_FILE': str(folder / 'nope.env')})
+    assert message is not None
+    assert 'missing' in message
+
+
+def test_an_unreadable_env_file_is_a_refusal(tmp_path: Path) -> None:
+    folder = tmp_path / 'Gaussian' / 'MeridianEngine'
+    folder.mkdir(parents=True)
     (folder / 'meridian-engine.env').mkdir()  # a directory cannot be read as text
-    assert refusal({'LOCALAPPDATA': str(tmp_path)}) is not None
+    message = refusal({'LOCALAPPDATA': str(tmp_path)})
+    assert message is not None
+    assert 'cannot be read' in message
 
 
 @pytest.mark.parametrize('raw', [f'{GEMINI}={SECRET}\n'.encode('utf-16'), b'A=\xff\xfe\n', b'A=1\x00\n'])
@@ -366,6 +424,41 @@ def test_the_engines_own_env_file_is_checked_whatever_the_runtime_dir_says(tmp_p
     assert GEMINI in message
 
 
+def test_the_canonical_env_file_is_checked_when_both_overrides_point_at_a_clean_decoy(tmp_path: Path) -> None:
+    environ, folder = runtime_with(tmp_path, f'{GEMINI}={SECRET}')
+    (folder / 'sub').mkdir()
+    (folder / 'sub' / 'clean.env').write_text('A=1\n', encoding='utf-8')
+    message = refusal(
+        {
+            **environ,
+            'MERIDIAN_RUNTIME_DIR': str(folder / 'sub'),
+            'GAUSSMERIDIAN_ENV_FILE': str(folder / 'sub' / 'clean.env'),
+        }
+    )
+    assert message is not None
+    assert GEMINI in message
+    assert SECRET not in message
+
+
+def test_the_canonical_env_file_is_checked_when_only_the_env_file_points_elsewhere(tmp_path: Path) -> None:
+    environ, folder = runtime_with(tmp_path, f'{OPENROUTER}={SECRET}')
+    (folder / 'clean.env').write_text('A=1\n', encoding='utf-8')
+    message = refusal({**environ, 'GAUSSMERIDIAN_ENV_FILE': str(folder / 'clean.env')})
+    assert message is not None
+    assert OPENROUTER in message
+
+
+def test_an_env_file_named_by_two_spellings_is_read_once_and_a_canonical_one_that_is_absent_is_fine(
+    tmp_path: Path,
+) -> None:
+    environ, folder = runtime_with(tmp_path)
+    spelled = str(folder / 'sub' / '..' / 'meridian-engine.env')
+    assert refusal({**environ, 'GAUSSMERIDIAN_ENV_FILE': spelled}) is None
+    (folder / 'meridian-engine.env').unlink()
+    (folder / 'clean.env').write_text('A=1\n', encoding='utf-8')
+    assert refusal({**environ, 'GAUSSMERIDIAN_ENV_FILE': str(folder / 'clean.env')}) is None
+
+
 def test_an_env_file_in_the_runtime_dir_override_is_checked_too(tmp_path: Path) -> None:
     environ, folder = runtime_with(tmp_path)
     (folder / 'sub').mkdir()
@@ -403,6 +496,39 @@ def test_a_non_loopback_url_is_refused_by_variable_name_only(tmp_path: Path, var
     assert 'evil.example.com' not in message
 
 
+@pytest.mark.parametrize('name', ['http_proxy', 'HTTP_PROXY', 'https_proxy', 'Https_Proxy', 'ALL_PROXY', 'all_proxy'])
+def test_a_proxy_in_the_environment_is_refused_by_name_only(tmp_path: Path, name: str) -> None:
+    environ, _ = runtime_with(tmp_path)
+    message = refusal({**environ, name: f'http://user:{SECRET}@proxy.example:3128'})
+    assert message is not None
+    assert 'proxy' in message
+    assert SECRET not in message
+    assert 'proxy.example' not in message
+
+
+def test_a_proxy_variable_that_is_empty_or_only_a_bypass_list_is_not_a_proxy(tmp_path: Path) -> None:
+    environ, _ = runtime_with(tmp_path)
+    assert refusal({**environ, 'HTTP_PROXY': '', 'all_proxy': ''}) is None
+    assert refusal({**environ, 'NO_PROXY': '*', 'no_proxy': '127.0.0.1'}) is None
+
+
+@pytest.mark.parametrize('scheme', ['http', 'https', 'all'])
+def test_a_system_proxy_is_refused_by_scheme_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scheme: str) -> None:
+    environ, _ = runtime_with(tmp_path)
+    monkeypatch.setattr(urllib.request, 'getproxies', lambda: {scheme: f'http://u:{SECRET}@sys.example:8080'})
+    message = refusal(environ)
+    assert message is not None
+    assert scheme in message
+    assert SECRET not in message
+    assert 'sys.example' not in message
+
+
+def test_system_proxy_entries_for_other_schemes_do_not_matter(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    environ, _ = runtime_with(tmp_path)
+    monkeypatch.setattr(urllib.request, 'getproxies', lambda: {'ftp': 'http://sys.example:21', 'no': '*'})
+    assert refusal(environ) is None
+
+
 def test_the_default_urls_are_loopback(tmp_path: Path) -> None:
     environ, _ = runtime_with(tmp_path)
     assert refusal(environ) is None
@@ -419,7 +545,7 @@ def test_the_contract_engine_meets_the_guard_even_without_the_script(
     (folder / 'local-api-key.txt').write_text('gmr_' + '0' * 64 + '\n', encoding='utf-8')
     monkeypatch.setattr(os, 'environ', environ)
     with pytest.raises(RuntimeError) as refused:
-        ContractEngine()
+        ContractEngine('t::node')
     assert GEMINI in str(refused.value)
     assert SECRET not in str(refused.value)
 
@@ -433,7 +559,8 @@ def test_the_contract_engine_reads_its_keys_from_the_checked_runtime_dir(
     (folder / 'sub' / 'local-api-key.txt').write_text(project + '\n', encoding='utf-8')
     (folder / 'sub' / 'local-integrator-key.txt').write_text(integrator + '\n', encoding='utf-8')
     monkeypatch.setattr(os, 'environ', {**environ, 'MERIDIAN_RUNTIME_DIR': str(folder / 'sub')})
-    engine = ContractEngine()
+    engine = ContractEngine('t::node')
+    assert engine.requested_by == 't::node'
     assert (engine.project_key, engine.integrator_key) == (project, integrator)
     assert (engine.public_url, engine.admin_url) == ('http://127.0.0.1:8180', 'http://127.0.0.1:8181')
 
@@ -486,19 +613,46 @@ def test_real():
     pass
 """
 UNMARKED_TEST = MARKED_TESTS + '\n\ndef test_unmarked_engine_user(engine):\n    pass\n'
-NEEDS_FAKE = 'needs the in-memory fake engine'
 NEEDS_REAL = 'needs the real local engine'
+# the fixture reached by name at run time, which no collection-time look at fixture names can see
+UNMARKED_DYNAMIC = (
+    MARKED_TESTS + '\n\ndef test_unmarked_dynamic_user(request):\n    request.getfixturevalue("engine")\n'
+)
+MARKED_DYNAMIC = """\
+import pytest
 
 
-def pytest_on(tmp_path: Path, tests: str, contract: bool) -> subprocess.CompletedProcess[str]:
+@pytest.mark.fake_only
+def test_fake_by_name(request):
+    assert request.getfixturevalue("engine").is_fake
+"""
+FAKE_ONLY_THAT_MUST_NOT_RUN = """\
+import pytest
+
+
+def test_pure():
+    pass
+
+
+@pytest.mark.fake_only
+def test_fake_that_would_touch_the_network():
+    raise AssertionError("ran")
+"""
+
+
+def pytest_on(
+    tmp_path: Path, tests: str, contract: bool, *args: str, addopts: str = ''
+) -> subprocess.CompletedProcess[str]:
     """Our conftest, as a plugin, over a sample file. In contract mode the only test that asks for the engine
-    fixture is skipped before it runs, so no engine object is built and nothing is contacted."""
+    fixture is deselected before it runs, so no engine object is built and nothing is contacted."""
     (tmp_path / 'test_sample.py').write_text(tests, encoding='utf-8')
     (tmp_path / 'pytest.ini').write_text('[pytest]\naddopts = -q -rs -p no:cacheprovider\n', encoding='utf-8')
     env = {'PYTHONPATH': str(ROOT), 'SYSTEMROOT': os.environ.get('SYSTEMROOT', ''), 'PATH': os.environ.get('PATH', '')}
     if contract:
         env['MERIDIAN_CONTRACT'] = '1'
-    command = [sys.executable, '-m', 'pytest', '-p', 'tests.conftest', '-c', str(tmp_path / 'pytest.ini')]
+    if addopts:
+        env['PYTEST_ADDOPTS'] = addopts
+    command = [sys.executable, '-m', 'pytest', '-p', 'tests.conftest', '-c', str(tmp_path / 'pytest.ini'), *args]
     command += ['--rootdir', str(tmp_path), str(tmp_path / 'test_sample.py')]
     return subprocess.run(command, cwd=ROOT, env=env, capture_output=True, text=True, timeout=120)
 
@@ -516,13 +670,38 @@ def test_without_the_real_engine_contract_tests_are_skipped(tmp_path: Path) -> N
     done = pytest_on(tmp_path, MARKED_TESTS, contract=False)
     assert done.returncode == 0
     assert NEEDS_REAL in done.stdout
-    assert NEEDS_FAKE not in done.stdout
     assert '2 passed, 1 skipped' in done.stdout
 
 
-def test_against_the_real_engine_fake_only_tests_are_skipped(tmp_path: Path) -> None:
+def test_against_the_real_engine_fake_only_tests_are_deselected(tmp_path: Path) -> None:
     done = pytest_on(tmp_path, MARKED_TESTS, contract=True)
     assert done.returncode == 0
-    assert NEEDS_FAKE in done.stdout
-    assert NEEDS_REAL not in done.stdout
-    assert '2 passed, 1 skipped' in done.stdout
+    assert '2 passed, 1 deselected' in done.stdout
+    assert 'skipped' not in done.stdout
+
+
+@pytest.mark.parametrize(
+    ('args', 'addopts'),
+    [(('-p', 'no:skipping'), ''), ((), '-p no:skipping'), (('-m', ''), ''), ((), '-m "" -p no:skipping')],
+)
+def test_no_option_makes_a_fake_only_test_run_against_the_real_engine(
+    tmp_path: Path, args: tuple[str, ...], addopts: str
+) -> None:
+    done = pytest_on(tmp_path, FAKE_ONLY_THAT_MUST_NOT_RUN, True, *args, addopts=addopts)
+    assert done.returncode == 0, done.stdout
+    assert 'ran' not in done.stdout
+    assert '1 passed, 1 deselected' in done.stdout
+
+
+@pytest.mark.parametrize('contract', [False, True])
+def test_the_engine_fixture_reached_by_name_in_an_unmarked_test_fails_it(tmp_path: Path, contract: bool) -> None:
+    done = pytest_on(tmp_path, UNMARKED_DYNAMIC, contract)
+    assert done.returncode == 1, done.stdout
+    assert 'test_unmarked_dynamic_user uses the engine without @pytest.mark.fake_only' in done.stdout
+    assert '1 failed' in done.stdout
+
+
+def test_the_engine_fixture_reached_by_name_in_a_marked_test_works(tmp_path: Path) -> None:
+    done = pytest_on(tmp_path, MARKED_DYNAMIC, contract=False)
+    assert done.returncode == 0, done.stdout
+    assert '1 passed' in done.stdout

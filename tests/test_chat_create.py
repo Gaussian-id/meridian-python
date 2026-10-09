@@ -6,7 +6,6 @@ import httpx
 import pytest
 
 from meridian import AsyncMeridian, Meridian, Ok
-from tests.support.engine import make_engine
 from tests.support.fake_engine import Scripted, completion, engine_error
 from tests.support.modes import make_client, resolve
 
@@ -159,8 +158,7 @@ async def test_params_nested_too_deep_to_encode_are_an_error_value_never_a_raise
 
 
 @pytest.mark.fake_only
-async def test_async_client_works_as_a_context_manager_and_closes() -> None:
-    engine = make_engine()
+async def test_async_client_works_as_a_context_manager_and_closes(engine: Any) -> None:
     transport: Any = engine.transport
     async with AsyncMeridian(engine.public_url, engine.project_key, transport=transport) as client:
         assert (await client.models.list()).error is None

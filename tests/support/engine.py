@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+import pytest
 
 from .contract_guard import refusal, runtime_dir
 from .fake_engine import FakeEngine
@@ -19,7 +20,9 @@ class ContractEngine:
     transport: httpx.BaseTransport | None = None
     requests: list[httpx.Request] = []  # noqa: RUF012
 
-    def __init__(self) -> None:
+    def __init__(self, requested_by: str) -> None:
+        self.requested_by = requested_by  # the test node that asked, for the record
+
         # [1] Even a direct `MERIDIAN_CONTRACT=1 pytest` meets the guard that scripts/contract.py runs
         reason = refusal(os.environ)
         folder = os.environ.get('MERIDIAN_RUNTIME_DIR') or runtime_dir(os.environ)
@@ -37,5 +40,11 @@ class ContractEngine:
         raise RuntimeError('scripted answers need the fake engine')
 
 
-def make_engine() -> FakeEngine | ContractEngine:
-    return ContractEngine() if CONTRACT else FakeEngine()
+def make_engine(node: Any) -> FakeEngine | ContractEngine:
+    """The engine for one test. A test that did not say which engine it is for (`fake_only` or `contract`) gets
+    neither, however it reached this fixture; collection-time checks cannot see `request.getfixturevalue`."""
+    if not any(node.get_closest_marker(name) for name in ('fake_only', 'contract')):
+        pytest.fail(
+            f'{node.nodeid} uses the engine without @pytest.mark.fake_only or @pytest.mark.contract', pytrace=False
+        )
+    return ContractEngine(node.nodeid) if CONTRACT else FakeEngine()

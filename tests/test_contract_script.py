@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 import threading
+import urllib.request
 from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -62,8 +63,15 @@ def run_main(environ: dict[str, str], calls: Calls) -> int:
     return int(script.main(environ, ready=calls.ready, runner=calls.run))
 
 
+@pytest.fixture(autouse=True)
+def no_system_proxy(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The guard asks the system for proxies (registry on Windows); a test must not depend on this machine's."""
+    monkeypatch.setattr(urllib.request, 'getproxies', lambda: dict[str, str]())
+
+
 def test_the_command_it_would_run_is_the_suite_without_the_fake_only_tests() -> None:
-    assert script.COMMAND == ['uv', 'run', 'pytest', '-m', 'not fake_only']
+    # --frozen: no resolving or syncing from an index; --no-env-file: a .env or UV_ENV_FILE cannot inject variables
+    assert script.COMMAND == ['uv', 'run', '--frozen', '--no-env-file', 'pytest', '-m', 'not fake_only']
 
 
 def test_a_paid_key_in_the_env_file_refuses_before_anything_runs(
@@ -115,24 +123,39 @@ def test_an_engine_that_is_not_ready_refuses_without_running(
 def test_an_allowed_run_launches_the_suite_in_contract_mode_with_the_code_it_returns(tmp_path: Path) -> None:
     environ, folder = runtime_with(tmp_path)
     calls = Calls(code=3)
-    env = {
-        **environ,
-        'MERIDIAN_PUBLIC_URL': 'http://localhost:9180',
-        'HTTP_PROXY': 'http://proxy.example:3128',
-        'https_proxy': 'http://proxy.example:3128',
-        'All_Proxy': 'http://proxy.example:3128',
-        'MERIDIAN_CONTRACT': '0',
-    }
+    env = {**environ, 'MERIDIAN_PUBLIC_URL': 'http://localhost:9180', 'MERIDIAN_CONTRACT': '0'}
     assert run_main(env, calls) == 3
     assert calls.ready_urls == ['http://localhost:9180']
     [(command, child, cwd)] = calls.runs
-    assert command == ['uv', 'run', 'pytest', '-m', 'not fake_only']
+    assert command == script.COMMAND
     assert cwd == str(ROOT)
     assert child['MERIDIAN_CONTRACT'] == '1'
     assert Path(child['MERIDIAN_RUNTIME_DIR']) == folder
     assert child['PATH'] == environ['PATH']
-    assert {key.upper() for key in child} & {'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY'} == set()
-    assert child['NO_PROXY'] == child['no_proxy'] == '127.0.0.1,localhost,::1'
+    assert child['NO_PROXY'] == child['no_proxy'] == '*'
+
+
+@pytest.mark.parametrize('name', ['HTTP_PROXY', 'https_proxy', 'All_Proxy'])
+def test_a_proxy_refuses_before_anything_runs(tmp_path: Path, capsys: pytest.CaptureFixture[str], name: str) -> None:
+    environ, _ = runtime_with(tmp_path)
+    calls = Calls()
+    assert run_main({**environ, name: f'http://u:{SECRET}@proxy.example:3128'}, calls) == 1
+    shown = capsys.readouterr()
+    assert 'proxy' in shown.err
+    assert SECRET not in shown.err + shown.out
+    assert 'proxy.example' not in shown.err + shown.out
+    assert (calls.ready_urls, calls.runs) == ([], [])
+
+
+def test_a_system_proxy_refuses_before_anything_runs(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    environ, _ = runtime_with(tmp_path)
+    monkeypatch.setattr(urllib.request, 'getproxies', lambda: {'https': 'http://sys.example:8080'})
+    calls = Calls()
+    assert run_main(environ, calls) == 1
+    assert 'https' in capsys.readouterr().err
+    assert (calls.ready_urls, calls.runs) == ([], [])
 
 
 def test_the_child_gets_the_runtime_dir_that_was_checked(tmp_path: Path) -> None:
