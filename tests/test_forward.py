@@ -3,7 +3,7 @@ import gzip
 import inspect
 import json
 import threading
-from collections.abc import Callable, Coroutine
+from collections.abc import AsyncIterator, Callable, Coroutine, Iterator
 from typing import Any, cast
 
 import anyio
@@ -61,19 +61,16 @@ async def send(
     key: str | None = None,
     request: Any = None,
     read: Callable[[], Any] | None = None,
-) -> Reply:
+) -> Reply[Any]:
+    # `read_body` gives the body as bytes (both modes) or as a chunk source (Iterable / AsyncIterable of bytes)
     raw = body if isinstance(body, bytes) else json.dumps(body).encode()
-    reader = read or (lambda: raw)
+    reader: Any = read or (lambda: raw)
     if isinstance(fwd, Forwarder):
         return fwd.handle(request, method=method, content_type=content_type, idempotency_key=key, read_body=reader)
-
-    async def aread() -> bytes:
-        return reader()
-
-    return await fwd.ahandle(request, method=method, content_type=content_type, idempotency_key=key, read_body=aread)
+    return await fwd.ahandle(request, method=method, content_type=content_type, idempotency_key=key, read_body=reader)
 
 
-def payload(reply: Reply) -> dict[str, Any]:
+def payload(reply: Reply[Any]) -> dict[str, Any]:
     assert isinstance(reply.body, bytes)
     return json.loads(reply.body)
 
@@ -91,7 +88,7 @@ def generic(request_id: str | None) -> dict[str, Any]:
     return {'error': error}
 
 
-async def drain(reply: Reply) -> bytes:
+async def drain(reply: Reply[Any]) -> bytes:
     body = reply.body
     if isinstance(body, bytes):
         return body
@@ -222,7 +219,7 @@ async def test_a_sync_forwarder_never_takes_an_async_authorize_as_a_yes(engine: 
 
 
 async def test_the_apps_own_reply_is_passed_through_by_default(mode: str, engine: Any) -> None:
-    mine = Reply(401, {'location': '/login'}, b'sign in')
+    mine = Reply[Any](401, {'location': '/login'}, b'sign in')
     reply = await send(build(mode, engine, authorize=lambda r: mine), {'messages': MSG})
     assert reply.passthrough is mine and engine.requests == []
 
@@ -241,7 +238,7 @@ async def test_the_apps_own_response_of_the_configured_type_is_passed_through(
 
 async def test_a_reply_is_not_a_response_once_another_response_type_is_configured(mode: str, engine: Any) -> None:
     reply = await send(
-        build(mode, engine, authorize=lambda r: Reply(200, {}, b'x'), response_type=AppResponse), {'messages': MSG}
+        build(mode, engine, authorize=lambda r: Reply[Any](200, {}, b'x'), response_type=AppResponse), {'messages': MSG}
     )
     assert reply.status == 403 and reply.passthrough is None and engine.requests == []
 
@@ -361,6 +358,95 @@ async def test_the_body_is_read_only_after_authorize_and_capped_before_it_is_par
     assert refused.status == 403 and reads == []
     too_big = await send(build(mode, engine), b'', read=read)
     assert too_big.status == 413 and reads == [1] and engine.requests == []
+
+
+class Source:
+    """A body as chunks, as a framework hands it over: a generator (sync) or an async generator (async)."""
+
+    def __init__(self, pieces: Callable[[], Any]) -> None:
+        self.pieces, self.pulled, self.closed = pieces, 0, False
+        self.made: list[object] = []  # held, so only an explicit close (never garbage collection) closes a source
+
+    def sync(self) -> Iterator[bytes]:
+        try:
+            for piece in self.pieces():
+                self.pulled += 1
+                yield piece
+        finally:
+            self.closed = True
+
+    async def asynchronous(self) -> AsyncIterator[bytes]:
+        try:
+            for piece in self.pieces():
+                self.pulled += 1
+                yield piece
+        finally:
+            self.closed = True
+
+    def reader(self, mode: str) -> Callable[[], Any]:
+        def read() -> object:
+            self.made.append(self.sync() if mode == 'sync' else self.asynchronous())
+            return self.made[-1]
+
+        return read
+
+
+def endless() -> Iterator[bytes]:
+    while True:
+        yield b'x' * 65536
+
+
+def breaking() -> Iterator[bytes]:
+    yield b'{"messages": '
+    raise OSError('the browser went away')
+
+
+async def test_the_body_may_come_as_chunks(mode: str, engine: Any) -> None:
+    body = json.dumps({'messages': MSG, 'temperature': 0.5}).encode()
+    source = Source(lambda: (body[i : i + 3] for i in range(0, len(body), 3)))
+    reply = await send(build(mode, engine), b'', read=source.reader(mode))
+    assert reply.status == 200 and engine.bodies()[0]['temperature'] == 0.5 and source.closed
+
+
+async def test_an_endless_chunk_source_is_413_and_read_no_further_than_the_cap(mode: str, engine: Any) -> None:
+    source = Source(endless)
+    reply = await send(build(mode, engine), b'', read=source.reader(mode))
+    assert reply.status == 413 and payload(reply)['error']['code'] == 'body_too_large' and engine.requests == []
+    assert source.pulled == MAX_BODY_BYTES // 65536 + 1 and source.closed
+
+
+async def test_a_chunk_source_is_read_only_after_authorize(mode: str, engine: Any) -> None:
+    source = Source(endless)
+    reply = await send(build(mode, engine, authorize=lambda r: False), b'', read=source.reader(mode))
+    assert reply.status == 403 and source.pulled == 0
+
+
+@pytest.mark.parametrize(
+    'pieces',
+    [
+        pytest.param(lambda: iter([b'{"messages": ', '[]}']), id='a-str-chunk'),
+        pytest.param(lambda: iter([b'{', 5]), id='an-int-chunk'),
+        pytest.param(lambda: breaking(), id='a-raising-source'),
+    ],
+)
+async def test_a_chunk_source_that_breaks_or_gives_no_bytes_is_400(
+    mode: str, engine: Any, pieces: Callable[[], Any]
+) -> None:
+    reply = await send(build(mode, engine), b'', read=Source(pieces).reader(mode))
+    assert reply.status == 400 and payload(reply)['error']['code'] == 'invalid_request' and engine.requests == []
+
+
+async def test_an_async_forwarder_does_not_take_a_sync_iterable_or_a_coroutine(engine: Any) -> None:
+    body = json.dumps({'messages': MSG}).encode()
+
+    async def coroutine() -> bytes:
+        return body
+
+    made: list[Any] = []
+    for read in (lambda: iter([body]), lambda: made.append(coroutine()) or made[-1]):
+        reply = await send(build('async', engine), b'', read=read)
+        assert reply.status == 400
+    assert inspect.getcoroutinestate(made[0]) == 'CORO_CLOSED' and engine.requests == []
 
 
 # --- What reaches the engine ----------------------------------------------------------------------------------------
@@ -755,7 +841,7 @@ async def test_a_200_reply_with_a_null_error_key_is_an_ordinary_reply(mode: str,
 # --- Streaming ------------------------------------------------------------------------------------------------------
 
 
-async def stream_reply(mode: str, engine: Any, parts: list[bytes], **scripted: Any) -> Reply:
+async def stream_reply(mode: str, engine: Any, parts: list[bytes], **scripted: Any) -> Reply[Any]:
     engine.next(Scripted(chunks=list(parts), **scripted))
     return await send(build(mode, engine), {'messages': MSG, 'stream': True})
 
@@ -1012,7 +1098,7 @@ async def test_an_event_just_under_the_byte_cap_passes_through(mode: str, engine
     assert await drain(await stream_reply(mode, engine, pieces(wire, 1024 * 1024))) == wire
 
 
-async def close_body(reply: Reply) -> None:
+async def close_body(reply: Reply[Any]) -> None:
     # What an adapter does on every exit path: no getattr and no cast, the body type says which close it has
     body = reply.body
     if isinstance(body, ReplyBody):
@@ -1070,6 +1156,135 @@ async def test_a_body_closed_after_it_finished_is_safe(mode: str, engine: Any) -
     await close_body(reply)
     await close_body(reply)
     assert engine.upstream_closed()
+
+
+async def test_a_reply_closes_its_own_body(mode: str, engine: Any) -> None:
+    reply = await stream_reply(mode, engine, [frame(chunk('a')).encode(), frame('[DONE]').encode()])
+    if mode == 'sync':
+        reply.close()
+        reply.close()
+    else:
+        await reply.aclose()
+        await reply.aclose()
+    assert engine.upstream_closed() and engine.parts_read() == 0
+
+
+async def test_closing_a_reply_with_a_bytes_body_does_nothing(mode: str, engine: Any) -> None:
+    reply = await send(build(mode, engine), {'messages': MSG})
+    reply.close()
+    await reply.aclose()
+    assert reply.status == 200 and payload(reply)['choices']
+
+
+def test_a_sync_reply_body_narrows_without_casts(engine: Any) -> None:
+    engine.next(Scripted(chunks=[frame('[DONE]').encode()]))
+    client = Meridian(engine.public_url, engine.project_key, transport=engine.transport)
+    reply: Reply[ReplyBody] = Forwarder[Any](client=client, authorize=allow_all).handle(
+        None,
+        method='POST',
+        content_type='application/json',
+        idempotency_key=None,
+        read_body=lambda: json.dumps({'messages': MSG, 'stream': True}).encode(),
+    )
+    body = reply.body
+    assert not isinstance(body, bytes)
+    assert b''.join(body) == frame('[DONE]').encode()
+    body.close()
+
+
+async def test_an_async_reply_body_narrows_without_casts(engine: Any) -> None:
+    engine.next(Scripted(chunks=[frame('[DONE]').encode()]))
+    client = AsyncMeridian(engine.public_url, engine.project_key, transport=engine.transport)
+    reply: Reply[AsyncReplyBody] = await AsyncForwarder[Any](client=client, authorize=allow_all).ahandle(
+        None,
+        method='POST',
+        content_type='application/json',
+        idempotency_key=None,
+        read_body=lambda: json.dumps({'messages': MSG, 'stream': True}).encode(),
+    )
+    body = reply.body
+    assert not isinstance(body, bytes)
+    assert b''.join([piece async for piece in body]) == frame('[DONE]').encode()
+    await body.aclose()
+
+
+# --- The default client: one shared client per settings (and per event loop) --------------------------------------
+
+
+class Recorder:
+    """Stands in for the network under the default client: records which httpx transport sent each request."""
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.transports: list[object] = []  # held, so no id is reused while the test runs
+        answer = json.dumps(completion('shared')).encode()
+
+        def handle(transport: object, request: httpx.Request) -> httpx.Response:
+            self.transports.append(transport)
+            return httpx.Response(200, headers={'content-type': 'application/json'}, content=answer)
+
+        async def ahandle(transport: object, request: httpx.Request) -> httpx.Response:
+            return handle(transport, request)
+
+        monkeypatch.setattr(httpx.HTTPTransport, 'handle_request', handle)
+        monkeypatch.setattr(httpx.AsyncHTTPTransport, 'handle_async_request', ahandle)
+
+    @property
+    def senders(self) -> list[int]:
+        return [id(transport) for transport in self.transports]
+
+
+def default_forwarder(mode: str) -> Fwd:
+    if mode == 'sync':
+        return Forwarder[Any](authorize=allow_all)
+    return AsyncForwarder[Any](authorize=allow_all)
+
+
+async def test_without_a_client_the_forwarder_shares_one_built_from_the_environment(
+    mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recorder = Recorder(monkeypatch)
+    monkeypatch.setenv('MERIDIAN_URL', f'http://shared-{mode}.engine.test')
+    monkeypatch.setenv('MERIDIAN_KEY', 'gmr_' + '2' * 64)
+    fwd = default_forwarder(mode)
+    first = await send(fwd, {'messages': MSG})
+    second = await send(fwd, {'messages': MSG})
+    third = await send(default_forwarder(mode), {'messages': MSG})
+    assert [first.status, second.status, third.status] == [200, 200, 200]
+    assert len(recorder.senders) == 3 and len(set(recorder.senders)) == 1
+
+
+async def test_a_missing_environment_at_start_up_never_poisons_the_shared_client(
+    mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    recorder = Recorder(monkeypatch)
+    monkeypatch.delenv('MERIDIAN_URL', raising=False)
+    monkeypatch.delenv('MERIDIAN_KEY', raising=False)
+    fwd = default_forwarder(mode)
+    early = await send(fwd, {'messages': MSG})
+    assert early.status == 503 and payload(early) == generic(None) and recorder.senders == []
+    monkeypatch.setenv('MERIDIAN_URL', f'http://late-{mode}.engine.test')
+    monkeypatch.setenv('MERIDIAN_KEY', 'gmr_' + '3' * 64)
+    later = await send(fwd, {'messages': MSG})
+    assert later.status == 200 and len(recorder.senders) == 1
+
+
+async def test_other_settings_get_another_shared_client(mode: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    recorder = Recorder(monkeypatch)
+    monkeypatch.setenv('MERIDIAN_URL', f'http://one-{mode}.engine.test')
+    monkeypatch.setenv('MERIDIAN_KEY', 'gmr_' + '4' * 64)
+    await send(default_forwarder(mode), {'messages': MSG})
+    monkeypatch.setenv('MERIDIAN_KEY', 'gmr_' + '5' * 64)
+    await send(default_forwarder(mode), {'messages': MSG})
+    assert len(set(recorder.senders)) == 2
+
+
+def test_each_event_loop_gets_its_own_shared_async_client(monkeypatch: pytest.MonkeyPatch) -> None:
+    recorder = Recorder(monkeypatch)
+    monkeypatch.setenv('MERIDIAN_URL', 'http://loops.engine.test')
+    monkeypatch.setenv('MERIDIAN_KEY', 'gmr_' + '6' * 64)
+    fwd = default_forwarder('async')
+    statuses = [asyncio.run(send(fwd, {'messages': MSG})).status for _ in range(2)]
+    assert statuses == [200, 200] and len(set(recorder.senders)) == 2
 
 
 # --- Closing while a read is waiting, and a read that ends badly ----------------------------------------------------
@@ -1209,7 +1424,7 @@ def wire_id(request_id: str) -> str:
     return cast('str', request_id.encode())
 
 
-def clean(reply: Reply) -> bool:
+def clean(reply: Reply[Any]) -> bool:
     return 'x-request-id' not in reply.headers and not any('\r' in v or '\n' in v for v in reply.headers.values())
 
 
@@ -1289,7 +1504,7 @@ async def test_a_200_with_an_error_and_only_bad_ids_has_no_id_at_all(mode: str, 
         pytest.param((AppResponse, bool), id='tuple-with-bool'),
         pytest.param('Reply', id='string'),
         pytest.param(None, id='none'),
-        pytest.param(Reply(200), id='instance'),
+        pytest.param(Reply[Any](200), id='instance'),
         pytest.param((Reply, 'AppResponse'), id='tuple-with-string'),
         pytest.param([Reply], id='list'),
     ],

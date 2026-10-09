@@ -11,12 +11,22 @@ import inspect
 import json
 import math
 import re
-from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Generator, Iterable, Iterator, Sequence
+from collections.abc import (
+    AsyncGenerator,
+    AsyncIterable,
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Generator,
+    Iterable,
+    Iterator,
+    Sequence,
+)
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Generic, Literal, Protocol, TypeVar, cast, runtime_checkable
 
-from ._client import AsyncMeridian, Meridian
+from ._client import AsyncMeridian, Meridian, async_shared_client, shared_client
 from ._errors import STATUS_BY_CODE, MeridianError, Result, config_error
 from ._stream import AsyncChatStream, ChatStream
 
@@ -110,21 +120,38 @@ class AsyncReplyBody(Protocol):
     async def aclose(self) -> None: ...
 
 
+B = TypeVar('B', bound='ReplyBody | AsyncReplyBody')
+
+
 @dataclass(frozen=True)
-class Reply:
+class Reply(Generic[B]):
     """What a framework adapter sends back. `passthrough` is set (and nothing else) when `authorize` answered with
     the app's own response.
 
-    A streaming `body` (a `ReplyBody` from `Forwarder`, an `AsyncReplyBody` from `AsyncForwarder`) holds the engine's
-    response open from the moment the Reply exists, so the caller must close it on every exit path: `close()` (sync)
-    or `await aclose()` (async), even when it never started iterating (the browser left before the first read).
-    Closing is idempotent; a finished body needs no closing but allows it. Any other body is plain `bytes`.
+    `Forwarder.handle` returns a `Reply[ReplyBody]` and `AsyncForwarder.ahandle` a `Reply[AsyncReplyBody]`: the body is
+    `bytes`, or a streaming body of that kind, so `isinstance(reply.body, bytes)` is all a type checker needs. A
+    streaming body holds the engine's response open from the moment the Reply exists, so the caller must close it on
+    every exit path: `reply.close()` (sync) or `await reply.aclose()` (async), or the body's own `close()` /
+    `aclose()`, even when it never started iterating (the browser left before the first read). Closing is idempotent,
+    a finished body allows it, and closing a reply whose body is `bytes` does nothing.
     """
 
     status: int
     headers: dict[str, str] = field(default_factory=lambda: {})
-    body: bytes | ReplyBody | AsyncReplyBody = b''
+    body: bytes | B = b''
     passthrough: object | None = None
+
+    def close(self) -> None:
+        """Close a sync streaming body; nothing to do for any other."""
+        if isinstance(self.body, ReplyBody):
+            self.body.close()
+
+    async def aclose(self) -> None:
+        """Close a streaming body of either kind; nothing to do for `bytes`."""
+        if isinstance(self.body, AsyncReplyBody):
+            await self.body.aclose()
+        else:
+            self.close()
 
 
 # --- Replies --------------------------------------------------------------------------------------------------------
@@ -140,11 +167,13 @@ def _safe_id(value: object) -> str | None:
     return value if isinstance(value, str) and _PRINTABLE.fullmatch(value) else None
 
 
-def _json_reply(status: int, value: Any, request_id: str | None = None, extra: dict[str, str] | None = None) -> Reply:
+def _json_reply(
+    status: int, value: Any, request_id: str | None = None, extra: dict[str, str] | None = None
+) -> Reply[Any]:
     headers = {'content-type': 'application/json', **(extra or {})}
     if request_id := _safe_id(request_id):
         headers['x-request-id'] = request_id
-    return Reply(status, headers, _dumps(value))
+    return Reply[Any](status, headers, _dumps(value))
 
 
 def _generic(request_id: str | None) -> dict[str, Any]:
@@ -163,7 +192,7 @@ def _generic_frame(request_id: str | None) -> bytes:
     return b'data: ' + _dumps(_generic(request_id)) + b'\n\n'
 
 
-def _browser_error(error: MeridianError) -> Reply:
+def _browser_error(error: MeridianError) -> Reply[Any]:
     # [1] The app's own key, account or credit, any failure on the SDK's side, and any engine code this SDK does not
     # recognise (a newer engine's code could be about the app's account): the generic 503, request id kept
     if error.code in APP_CREDENTIAL_CODES or error.type == 'client_error' or error.engine_code is not None:
@@ -176,27 +205,27 @@ def _browser_error(error: MeridianError) -> Reply:
     return _json_reply(error.status if error.status > 0 else 502, {'error': body}, error.request_id)
 
 
-def _refuse(status: int, code: str, message: str, extra: dict[str, str] | None = None) -> Reply:
+def _refuse(status: int, code: str, message: str, extra: dict[str, str] | None = None) -> Reply[Any]:
     kind = 'permission_error' if code == 'permission_denied' else 'invalid_request_error'
     return _json_reply(status, {'error': {'message': message, 'type': kind, 'code': code}}, None, extra)
 
 
-def _denied() -> Reply:
+def _denied() -> Reply[Any]:
     return _refuse(403, 'permission_denied', 'Not allowed to use this route.')
 
 
-def _unavailable() -> Reply:
+def _unavailable() -> Reply[Any]:
     return _browser_error(config_error('The Meridian client could not be created.'))
 
 
-def _unreadable() -> Reply:
+def _unreadable() -> Reply[Any]:
     return _refuse(400, 'invalid_request', 'The body could not be read.')
 
 
 # --- Request checks -------------------------------------------------------------------------------------------------
 
 
-def _precheck(method: str, content_type: str | None) -> Reply | None:
+def _precheck(method: str, content_type: str | None) -> Reply[Any] | None:
     """POST and JSON only, checked before authorize: a cross-site form can send neither."""
     if method.upper() != 'POST':
         return _refuse(405, 'method_not_allowed', 'Use POST.', {'allow': 'POST'})
@@ -205,13 +234,13 @@ def _precheck(method: str, content_type: str | None) -> Reply | None:
     return None
 
 
-def _verdict(value: object, response_type: type | tuple[type, ...]) -> Reply | None:
+def _verdict(value: object, response_type: type | tuple[type, ...]) -> Reply[Any] | None:
     """Only the literal True proceeds. An instance of `response_type` is the app's own response, returned untouched.
     Anything else (a truthy user object, 0, '', a coroutine, ...) is a 403: it must never be taken for a yes."""
     if value is True:
         return None
     if isinstance(value, response_type):
-        return Reply(0, passthrough=value)
+        return Reply[Any](0, passthrough=value)
     return _denied()
 
 
@@ -232,6 +261,71 @@ def _client_for(option: object, kind: type[C]) -> C | None:
 
 
 # --- The body and what reaches the engine ---------------------------------------------------------------------------
+
+
+def _too_large() -> Reply[Any]:
+    return _refuse(413, 'body_too_large', 'The request body is too large.')
+
+
+def _take(gathered: bytearray, piece: object) -> Reply[Any] | None:
+    """Add one chunk of the browser's body: a refusal for a chunk that is not bytes, or once the body is over
+    MAX_BODY_BYTES (nothing more is read); otherwise None."""
+    if not isinstance(piece, (bytes, bytearray)):
+        return _unreadable()
+    gathered += piece
+    return _too_large() if len(gathered) > MAX_BODY_BYTES else None
+
+
+def _read(read_body: Callable[[], object]) -> bytes | Reply[Any]:
+    """The browser's body from `read_body`: its bytes, or a chunk source read up to the cap and closed. A raise, or
+    anything that gives no bytes, is a 400."""
+    try:
+        # [1] Plain bytes, already in memory
+        source = read_body()
+        if isinstance(source, (bytes, bytearray)):
+            return _too_large() if len(source) > MAX_BODY_BYTES else bytes(source)
+
+        # [2] Chunks, read only until the cap is passed; the source is closed whatever happens
+        pieces = iter(cast('Iterable[object]', source))
+        gathered = bytearray()
+        try:
+            for piece in pieces:
+                if refused := _take(gathered, piece):
+                    return refused
+        finally:
+            close = getattr(pieces, 'close', None)
+            if callable(close):
+                close()
+        return bytes(gathered)
+    except Exception:
+        return _unreadable()
+
+
+async def _aread(read_body: Callable[[], object]) -> bytes | Reply[Any]:
+    """`_read` for async: the bytes, or an async chunk source (a sync iterable or an awaitable gives no bytes)."""
+    try:
+        # [1] Plain bytes, already in memory; a coroutine is no source, and is closed so it is never left un-awaited
+        source = read_body()
+        if isinstance(source, (bytes, bytearray)):
+            return _too_large() if len(source) > MAX_BODY_BYTES else bytes(source)
+        if inspect.iscoroutine(source):
+            source.close()
+            return _unreadable()
+
+        # [2] Chunks, read only until the cap is passed; the source is closed whatever happens
+        pieces = aiter(cast('AsyncIterable[object]', source))
+        gathered = bytearray()
+        try:
+            async for piece in pieces:
+                if refused := _take(gathered, piece):
+                    return refused
+        finally:
+            aclose = getattr(pieces, 'aclose', None)
+            if callable(aclose):
+                await cast('Callable[[], Awaitable[object]]', aclose)()
+        return bytes(gathered)
+    except Exception:
+        return _unreadable()
 
 
 def _not_json(_: str) -> float:
@@ -301,18 +395,15 @@ def _too_deep(body: dict[str, Any]) -> bool:
     return False
 
 
-def _parse(raw: bytes) -> dict[str, Any] | Reply:
-    # [1] Over the engine's own limit: refused before anything is decoded
-    if len(raw) > MAX_BODY_BYTES:
-        return _refuse(413, 'body_too_large', 'The request body is too large.')
-
-    # [2] Strict UTF-8 JSON (no UTF-16 or UTF-32, no BOM; no NaN or Infinity, which would not re-encode as JSON)
+def _parse(raw: bytes) -> dict[str, Any] | Reply[Any]:
+    # [1] Strict UTF-8 JSON (no UTF-16 or UTF-32, no BOM; no NaN or Infinity, which would not re-encode as JSON). The
+    # bytes are already within MAX_BODY_BYTES (_read)
     try:
         body: Any = json.loads(raw.decode('utf-8'), parse_constant=_not_json, parse_float=_finite)
     except (ValueError, RecursionError):
         return _refuse(400, 'invalid_request', 'The body must be JSON.')
 
-    # [3] An object with a non-empty message list, nested no deeper than a chat body ever is
+    # [2] An object with a non-empty message list, nested no deeper than a chat body ever is
     if not isinstance(body, dict):
         return _refuse(400, 'invalid_request', 'messages must be a non-empty list.')
     fields = cast('dict[str, Any]', body)
@@ -344,7 +435,7 @@ def _params(body: dict[str, Any], allowed: _Allowed) -> dict[str, Any]:
     return params
 
 
-def _ask(raw: bytes, allowed: _Allowed, idempotency_key: str | None) -> _Ask | Reply:
+def _ask(raw: bytes, allowed: _Allowed, idempotency_key: str | None) -> _Ask | Reply[Any]:
     body = _parse(raw)
     if isinstance(body, Reply):
         return body
@@ -611,15 +702,15 @@ class _AsyncBody:
         await self._stream.cancel()  # never started, or mid-read: close upstream directly
 
 
-def _streaming(request_id: str | None, body: ReplyBody | AsyncReplyBody) -> Reply:
+def _streaming(request_id: str | None, body: ReplyBody | AsyncReplyBody) -> Reply[Any]:
     # Headers are the route's own: the engine's content-encoding and content-length never describe these bytes
     headers = dict(_SSE_HEADERS)
     if request_id := _safe_id(request_id):
         headers['x-request-id'] = request_id
-    return Reply(200, headers, body)
+    return Reply[Any](200, headers, body)
 
 
-def _buffered(result: Result[Any]) -> Reply:
+def _buffered(result: Result[Any]) -> Reply[Any]:
     if result.error is not None:
         return _browser_error(result.error)
 
@@ -662,7 +753,9 @@ class Forwarder(Generic[R]):
     `client` is a Meridian, or a function returning one. The function is called for every request, never at creation,
     and the forwarder never closes a client, given or returned: the function should return one long-lived shared
     client, built once and closed by the app at shutdown, never a new client per request (each one would hold its own
-    connections open).
+    connections open). Without a `client`, the forwarder uses one shared client per `MERIDIAN_URL` / `MERIDIAN_KEY`,
+    read at each request and built on first use; settings that cannot work are a generic 503 and are never kept, so
+    an environment fixed after start-up is picked up.
 
     `authorize(request)` decides who may spend the app's credit: only the literal `True` proceeds. An instance of
     `response_type` (a `Reply` by default; an adapter passes its framework's response class) is the app's own
@@ -673,16 +766,17 @@ class Forwarder(Generic[R]):
     def __init__(
         self,
         *,
-        client: Meridian | Callable[[], Meridian],
+        client: Meridian | Callable[[], Meridian] | None = None,
         authorize: Callable[[R], object],
         allow: AllowRule | None = None,
         response_type: type | tuple[type, ...] = Reply,
     ) -> None:
         _require(authorize)
-        self._client, self._authorize, self._allowed = client, authorize, _Allowed.of(allow or AllowRule())
+        self._client = shared_client if client is None else client
+        self._authorize, self._allowed = authorize, _Allowed.of(allow or AllowRule())
         self._response_type = _response_types(response_type)
 
-    def _decide(self, request: R) -> Reply | None:
+    def _decide(self, request: R) -> Reply[Any] | None:
         # A raising authorize is a refusal, never a crash and never a way through
         try:
             outcome = self._authorize(request)
@@ -701,24 +795,22 @@ class Forwarder(Generic[R]):
         method: str,
         content_type: str | None,
         idempotency_key: str | None,
-        read_body: Callable[[], bytes],
-    ) -> Reply:
-        """Answer one browser request. `read_body` is called only after `authorize` said yes, and the bytes it
-        returns are capped at MAX_BODY_BYTES (413): the adapter should bound its own read too, so a huge body is
-        never held in memory before this check. A streaming `Reply.body` must be closed by the caller (see Reply)."""
+        read_body: Callable[[], bytes | bytearray | Iterable[bytes]],
+    ) -> Reply[ReplyBody]:
+        """Answer one browser request. `read_body` is called only after `authorize` said yes. It returns the body's
+        chunks (any iterable of bytes, such as a generator over the framework's input stream), which are read only up
+        to MAX_BODY_BYTES: past it the answer is 413, nothing more is read, and the source is closed. Plain bytes
+        already in memory are fine too. A streaming body must be closed by the caller (see Reply)."""
         # [1] POST and JSON only, then the app's own decision
         refused = _precheck(method, content_type) or self._decide(request)
         if refused is not None:
             return refused
 
-        # [2] A valid body, of which only the allowed fields go on
-        try:
-            raw = cast('object', read_body())
-        except Exception:
-            return _unreadable()
-        if not isinstance(raw, (bytes, bytearray)):
-            return _unreadable()
-        ask = _ask(bytes(raw), self._allowed, idempotency_key)
+        # [2] A valid body within the cap, of which only the allowed fields go on
+        raw = _read(read_body)
+        if isinstance(raw, Reply):
+            return raw
+        ask = _ask(raw, self._allowed, idempotency_key)
         if isinstance(ask, Reply):
             return ask
 
@@ -740,21 +832,23 @@ class Forwarder(Generic[R]):
 class AsyncForwarder(Generic[R]):
     """Forwarder for an async framework; see `Forwarder`. `client` is an AsyncMeridian or a function returning one
     (the function should return one long-lived shared client, closed by the app at shutdown; the forwarder never closes
-    it), and `authorize` may be async: it is awaited once, and an awaitable it returns is a 403, not a yes."""
+    it); without one, a shared client per settings and per running event loop is used. `authorize` may be async: it is
+    awaited once, and an awaitable it returns is a 403, not a yes."""
 
     def __init__(
         self,
         *,
-        client: AsyncMeridian | Callable[[], AsyncMeridian],
+        client: AsyncMeridian | Callable[[], AsyncMeridian] | None = None,
         authorize: Callable[[R], object],
         allow: AllowRule | None = None,
         response_type: type | tuple[type, ...] = Reply,
     ) -> None:
         _require(authorize)
-        self._client, self._authorize, self._allowed = client, authorize, _Allowed.of(allow or AllowRule())
+        self._client = async_shared_client if client is None else client
+        self._authorize, self._allowed = authorize, _Allowed.of(allow or AllowRule())
         self._response_type = _response_types(response_type)
 
-    async def _decide(self, request: R) -> Reply | None:
+    async def _decide(self, request: R) -> Reply[Any] | None:
         # A raising or rejecting authorize is a refusal, never a crash and never a way through
         try:
             outcome = self._authorize(request)
@@ -775,23 +869,21 @@ class AsyncForwarder(Generic[R]):
         method: str,
         content_type: str | None,
         idempotency_key: str | None,
-        read_body: Callable[[], Awaitable[bytes]],
-    ) -> Reply:
-        """`Forwarder.handle` for async. The adapter should bound its own `read_body` at MAX_BODY_BYTES too, and must
-        `await aclose()` a streaming `Reply.body` on every exit path (see Reply)."""
+        read_body: Callable[[], bytes | bytearray | AsyncIterable[bytes]],
+    ) -> Reply[AsyncReplyBody]:
+        """`Forwarder.handle` for async. `read_body` returns the body's chunks as an async iterable (such as the
+        framework's request stream), read only up to MAX_BODY_BYTES, or plain bytes; a coroutine or a sync iterable
+        gives no body (400). A streaming body must be closed with `await reply.aclose()` on every exit path."""
         # [1] POST and JSON only, then the app's own decision
         refused = _precheck(method, content_type) or await self._decide(request)
         if refused is not None:
             return refused
 
-        # [2] A valid body, of which only the allowed fields go on
-        try:
-            raw = cast('object', await read_body())
-        except Exception:
-            return _unreadable()
-        if not isinstance(raw, (bytes, bytearray)):
-            return _unreadable()
-        ask = _ask(bytes(raw), self._allowed, idempotency_key)
+        # [2] A valid body within the cap, of which only the allowed fields go on
+        raw = await _aread(read_body)
+        if isinstance(raw, Reply):
+            return raw
+        ask = _ask(raw, self._allowed, idempotency_key)
         if isinstance(ask, Reply):
             return ask
 

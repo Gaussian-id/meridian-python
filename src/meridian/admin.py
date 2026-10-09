@@ -47,7 +47,6 @@ bytes of `pickle.dumps`; and pytest's line diff of two strings (`assert key == '
 
 from __future__ import annotations
 
-import os
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
@@ -55,7 +54,7 @@ from urllib.parse import quote, unquote
 
 import httpx
 
-from ._config import ASYNC_IO, SYNC_IO, io_refusal, url_refusal
+from ._config import ADMIN, ASYNC_IO, SYNC_IO, refusal, resolve_settings
 from ._errors import Err, MeridianError, Ok, Result, config_error
 from ._prices import without_prices
 from ._transport import AsyncRefusedTransport, AsyncTransport, Call, RefusedTransport, SyncTransport
@@ -261,24 +260,6 @@ class _Logs(_Group[R]):
         return self._send(_scoped('/v1/logs', project_id, page_size=page_size, cursor=cursor))
 
 
-def _resolve(url: str | None, key: str | None) -> tuple[str, str]:
-    return (
-        url if url is not None else os.environ.get('MERIDIAN_ADMIN_URL', ''),
-        key if key is not None else os.environ.get('MERIDIAN_INTEGRATOR_KEY', ''),
-    )
-
-
-def _refusal(
-    url: object, key: object, http_client: object, transport: object, kinds: tuple[type, type]
-) -> MeridianError | None:
-    """The configuration error every call answers with, or None when the settings are usable."""
-    if refused := url_refusal(url, 'The Meridian admin URL'):
-        return refused
-    if not isinstance(key, str) or not key:
-        return config_error('A Meridian integrator key is required: pass key= or set MERIDIAN_INTEGRATOR_KEY.')
-    return io_refusal(http_client, transport, kinds)
-
-
 def _hide_key(data: Any) -> Any:
     """A key-issue reply with its `api_key` as a Secret; a reply of any other shape as it is."""
     if not isinstance(data, dict):
@@ -312,13 +293,13 @@ class MeridianAdmin:
         transport: httpx.BaseTransport | None = None,
     ) -> None:
         """`url` and `key` default to `MERIDIAN_ADMIN_URL` and `MERIDIAN_INTEGRATOR_KEY`."""
-        url, key = _resolve(url, key)
-        refused = _refusal(url, key, http_client, transport, SYNC_IO)
+        base, token = resolve_settings(url, key, ADMIN)
+        refused = refusal(base, token, http_client, transport, ADMIN, SYNC_IO)
         self._transport: RefusedTransport | SyncTransport = (
             RefusedTransport(refused)
             if refused
             else SyncTransport(
-                url, key, timeout=timeout, max_retries=max_retries, http_client=http_client, transport=transport
+                base, token, timeout=timeout, max_retries=max_retries, http_client=http_client, transport=transport
             )
         )
         self.orgs: _Orgs[Result[Any]] = _Orgs(self._send)
@@ -359,13 +340,13 @@ class AsyncMeridianAdmin:
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         """`url` and `key` default to `MERIDIAN_ADMIN_URL` and `MERIDIAN_INTEGRATOR_KEY`."""
-        url, key = _resolve(url, key)
-        refused = _refusal(url, key, http_client, transport, ASYNC_IO)
+        base, token = resolve_settings(url, key, ADMIN)
+        refused = refusal(base, token, http_client, transport, ADMIN, ASYNC_IO)
         self._transport: AsyncRefusedTransport | AsyncTransport = (
             AsyncRefusedTransport(refused)
             if refused
             else AsyncTransport(
-                url, key, timeout=timeout, max_retries=max_retries, http_client=http_client, transport=transport
+                base, token, timeout=timeout, max_retries=max_retries, http_client=http_client, transport=transport
             )
         )
         self.orgs: _Orgs[Awaitable[Result[Any]]] = _Orgs(self._send)

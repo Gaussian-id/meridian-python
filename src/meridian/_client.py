@@ -1,31 +1,14 @@
 from __future__ import annotations
 
-import os
+import asyncio
+import threading
+import weakref
 
 import httpx
 
 from ._chat import AsyncChatApi, AsyncModelsApi, ChatApi, ModelsApi
-from ._config import ASYNC_IO, SYNC_IO, io_refusal, url_refusal
-from ._errors import MeridianError, config_error
+from ._config import ASYNC_IO, PUBLIC, SYNC_IO, refusal, resolve_settings
 from ._transport import AsyncRefusedTransport, AsyncTransport, RefusedTransport, SyncTransport
-
-
-def resolve_settings(url: str | None, key: str | None) -> tuple[str, str]:
-    return (
-        url if url is not None else os.environ.get('MERIDIAN_URL', ''),
-        key if key is not None else os.environ.get('MERIDIAN_KEY', ''),
-    )
-
-
-def refusal(
-    url: object, key: object, http_client: object, transport: object, kinds: tuple[type, type]
-) -> MeridianError | None:
-    """The configuration error both clients answer every call with, or None when the settings are usable."""
-    if refused := url_refusal(url, 'The Meridian URL'):
-        return refused
-    if not isinstance(key, str) or not key:
-        return config_error('A Meridian project key is required: pass key= or set MERIDIAN_KEY.')
-    return io_refusal(http_client, transport, kinds)
 
 
 class Meridian:
@@ -42,13 +25,13 @@ class Meridian:
         transport: httpx.BaseTransport | None = None,
     ) -> None:
         """`http_client` and `transport` are mutually exclusive; passing both is a configuration error."""
-        url, key = resolve_settings(url, key)
-        refused = refusal(url, key, http_client, transport, SYNC_IO)
+        base, token = resolve_settings(url, key, PUBLIC)
+        refused = refusal(base, token, http_client, transport, PUBLIC, SYNC_IO)
         self._transport: RefusedTransport | SyncTransport = (
             RefusedTransport(refused)
             if refused
             else SyncTransport(
-                url, key, timeout=timeout, max_retries=max_retries, http_client=http_client, transport=transport
+                base, token, timeout=timeout, max_retries=max_retries, http_client=http_client, transport=transport
             )
         )
         self.chat = ChatApi(self._transport)
@@ -78,13 +61,13 @@ class AsyncMeridian:
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         """`http_client` and `transport` are mutually exclusive; passing both is a configuration error."""
-        url, key = resolve_settings(url, key)
-        refused = refusal(url, key, http_client, transport, ASYNC_IO)
+        base, token = resolve_settings(url, key, PUBLIC)
+        refused = refusal(base, token, http_client, transport, PUBLIC, ASYNC_IO)
         self._transport: AsyncRefusedTransport | AsyncTransport = (
             AsyncRefusedTransport(refused)
             if refused
             else AsyncTransport(
-                url, key, timeout=timeout, max_retries=max_retries, http_client=http_client, transport=transport
+                base, token, timeout=timeout, max_retries=max_retries, http_client=http_client, transport=transport
             )
         )
         self.chat = AsyncChatApi(self._transport)
@@ -98,3 +81,52 @@ class AsyncMeridian:
 
     async def __aexit__(self, *_: object) -> None:
         await self.aclose()
+
+
+# --- The shared default clients -------------------------------------------------------------------------------------
+# One long-lived client per (url, key), built on first use, for code that is given no client of its own (the
+# forwarding route's default). Only usable settings are kept: a client refused for a missing or bad setting is made
+# afresh each time, so an environment fixed after start-up is picked up and a bad one never sticks.
+
+_lock = threading.Lock()
+_shared: dict[tuple[str, str], Meridian] = {}
+# An httpx.AsyncClient belongs to the event loop it was used on: one per loop, dropped with the loop
+_async_shared: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, dict[tuple[str, str], AsyncMeridian]] = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def shared_client(url: str | None = None, key: str | None = None) -> Meridian:
+    """The shared client for these settings (defaulting to `MERIDIAN_URL` / `MERIDIAN_KEY`)."""
+    # [1] Settings that cannot work give a refusing client, never kept
+    base, token = resolve_settings(url, key, PUBLIC)
+    if refusal(base, token, None, None, PUBLIC, SYNC_IO) is not None:
+        return Meridian(base, token)
+
+    # [2] Otherwise the one client for them, built once
+    with _lock:
+        client = _shared.get((base, token))
+        if client is None:
+            client = _shared[base, token] = Meridian(base, token)
+        return client
+
+
+def async_shared_client(url: str | None = None, key: str | None = None) -> AsyncMeridian:
+    """`shared_client` for async code: one per settings and per running asyncio event loop. Called with no running
+    asyncio loop (another async library), it returns a new client each time."""
+    # [1] Settings that cannot work give a refusing client, never kept
+    base, token = resolve_settings(url, key, PUBLIC)
+    if refusal(base, token, None, None, PUBLIC, ASYNC_IO) is not None:
+        return AsyncMeridian(base, token)
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return AsyncMeridian(base, token)
+
+    # [2] Otherwise the one client for them on this loop, built once
+    with _lock:
+        clients = _async_shared.setdefault(loop, {})
+        client = clients.get((base, token))
+        if client is None:
+            client = clients[base, token] = AsyncMeridian(base, token)
+        return client
