@@ -4,14 +4,16 @@ pyright (it is typed against `httpx2`, which is not a dependency) and cannot mak
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator, Callable, Mapping
+import time
+from collections.abc import AsyncIterator, Callable, Iterator, Mapping
 from typing import Any, cast
 
 import anyio
 import httpx
 import pytest
-from fastapi import Depends, FastAPI, Request
+from fastapi import BackgroundTasks, Depends, FastAPI, Request
 from fastapi.responses import JSONResponse, RedirectResponse, Response, StreamingResponse
+from starlette.requests import ClientDisconnect
 from starlette.types import Message, Scope
 
 from meridian import AsyncMeridian
@@ -25,11 +27,11 @@ pytestmark = [pytest.mark.anyio, pytest.mark.fake_only]
 MSG = [{'role': 'user', 'content': 'hi'}]
 
 
-async def pieces(body: bytes | AsyncIterator[bytes]) -> AsyncIterator[bytes]:
+async def pieces(body: bytes | Iterator[bytes]) -> AsyncIterator[bytes]:
     if isinstance(body, bytes):
         yield body
         return
-    async for piece in body:
+    for piece in body:
         yield piece
 
 
@@ -40,7 +42,7 @@ async def drive(
     path: str = '/chat',
     content_type: str | None = 'application/json',
     headers: Mapping[str, str] | None = None,
-    body: bytes | AsyncIterator[bytes] = CHAT,
+    body: bytes | Iterator[bytes] = CHAT,
     leave_after: int | None = None,
     spec_version: str = '2.4',
     on_start: Callable[[], None] = lambda: None,
@@ -103,7 +105,7 @@ async def drive(
 
     try:
         await app(scope, receive, send)
-    except Exception:
+    except (OSError, ClientDisconnect):  # how Starlette reports a client that left (spec 2.4); anything else is a bug
         if leave_after is None:
             raise
     return status, response_headers, b''.join(received)
@@ -124,7 +126,7 @@ class FastApiHarness:
         authorize: Callable[[Any], object] = allow,
         method: str = 'POST',
         content_type: str | None = 'application/json',
-        body: bytes | AsyncIterator[bytes] = CHAT,
+        body: bytes | Iterator[bytes] = CHAT,
         leave_after: int | None = None,
     ) -> Wire:
         sent: list[Response] = []
@@ -146,10 +148,13 @@ class FastApiHarness:
             spec_version=self.spec_version,
         )
 
-        async def close_again() -> None:
+        async def close_again() -> int:
+            closed = 0
             for response in sent:
                 if isinstance(response, StreamingResponse) and isinstance(response.body_iterator, AsyncReplyBody):
                     await response.body_iterator.aclose()
+                    closed += 1
+            return closed
 
         return Wire(status, headers, received, close_again)
 
@@ -190,6 +195,75 @@ async def test_a_cancelled_request_still_closes_upstream(engine: Any, spec_versi
     with anyio.CancelScope() as request_scope:
         await drive(app, body=STREAM, spec_version=spec_version, on_start=request_scope.cancel)
     assert request_scope.cancelled_caught and held.closed
+
+
+class NeverCloses(httpx.AsyncByteStream):
+    """An engine stream whose close never returns (a connection that hangs on shutdown)."""
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        yield frame(chunk('a')).encode()
+        await anyio.sleep_forever()
+
+    async def aclose(self) -> None:
+        await anyio.sleep_forever()
+
+
+async def test_a_close_that_never_returns_is_given_up_within_the_bound(engine: Any) -> None:
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(200, headers={'content-type': 'text/event-stream'}, stream=NeverCloses())
+    )
+    client = AsyncMeridian(engine.public_url, engine.project_key, transport=transport)
+    app = FastAPI()
+    app.post('/chat')(forward_route(authorize=allow, client=client))
+    started = time.monotonic()
+    await drive(app, body=STREAM, leave_after=0)
+    assert time.monotonic() - started < 8  # the close is shielded but bounded at 5 s
+
+
+def test_a_coroutine_function_client_is_refused_at_construction() -> None:
+    async def make() -> AsyncMeridian:
+        return AsyncMeridian()
+
+    for factory in (meridian_client, make):
+        with pytest.raises(TypeError, match='long-lived'):
+            forward_route(authorize=allow, client=cast('Any', factory))
+
+
+async def test_a_response_fastapi_never_sends_still_closes_upstream(engine: Any) -> None:
+    async def teardown_fails() -> AsyncIterator[None]:
+        yield
+        raise RuntimeError('teardown')
+
+    engine.next(Scripted(chunks=[frame(chunk('a')), frame('[DONE]')]))
+    client = AsyncMeridian(engine.public_url, engine.project_key, transport=engine.transport, max_retries=0)
+    app = FastAPI()
+    # A function-scoped yield dependency exits before FastAPI sends the response: its raise means it is never sent
+    app.post('/chat', dependencies=[Depends(teardown_fails, scope='function')])(
+        forward_route(authorize=allow, client=client)
+    )
+    with pytest.raises(RuntimeError, match='teardown'):
+        await drive(app, body=STREAM)
+    assert engine.upstream_closed() and engine.parts_read() == 0
+
+
+async def test_background_tasks_run_after_upstream_is_closed(engine: Any) -> None:
+    engine.next(Scripted(chunks=[*(frame(chunk(str(i))) for i in range(20)), frame('[DONE]')]))
+    client = AsyncMeridian(engine.public_url, engine.project_key, transport=engine.transport, max_retries=0)
+    route = forward_route(authorize=allow, client=client)
+    seen: list[bool] = []
+
+    def note() -> None:
+        seen.append(engine.upstream_closed())
+
+    async def chat(request: Request, tasks: BackgroundTasks) -> Response:
+        tasks.add_task(note)
+        return await route(request)
+
+    app = FastAPI()
+    app.post('/chat')(chat)
+    # Spec 2.0: Starlette runs the background task even after the browser left, while the relay is still suspended
+    await drive(app, body=STREAM, leave_after=1, spec_version='2.0')
+    assert seen == [True]
 
 
 def app_for(engine: Any, authorize: Callable[[Request], object] = lambda r: True) -> FastAPI:

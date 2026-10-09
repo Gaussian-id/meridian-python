@@ -9,7 +9,7 @@ path, an app's own response is passed through, and the hidden codes stay hidden.
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -23,12 +23,13 @@ MEBIBYTE = 1 << 20
 
 @dataclass
 class Wire:
-    """What the browser saw. `close_again` closes the reply once more, as a second owner of it would."""
+    """What the browser saw. `close_again` closes the reply's streamed body once more, as a second owner of it would,
+    and says how many streamed bodies it closed (0 would make a double-close check pass without closing anything)."""
 
     status: int
     headers: dict[str, str]
     body: bytes
-    close_again: Callable[[], Awaitable[None]]
+    close_again: Callable[[], Awaitable[int]]
 
     def json(self) -> Any:
         return json.loads(self.body)
@@ -53,13 +54,14 @@ class Harness(Protocol):
         authorize: Callable[[Any], object] = allow,
         method: str = 'POST',
         content_type: str | None = 'application/json',
-        body: bytes | AsyncIterator[bytes] = CHAT,
+        body: bytes | Iterator[bytes] = CHAT,
         leave_after: int | None = None,
     ) -> Wire:
         """Mount the route with this `authorize`, send one request, and return what the browser received.
 
-        `leave_after=n`: the browser goes away once it has received n chunks of the response body (0: before the
-        first), and the Wire holds what it got until then."""
+        `body` is the request body, or its chunks, pulled one at a time as the server asks for them (an async harness
+        wraps the iterator). `leave_after=n`: the browser goes away once it has received n chunks of the response body
+        (0: before the first), and the Wire holds what it got until then."""
         ...
 
 
@@ -69,6 +71,7 @@ async def streams_through(h: Harness) -> None:
     assert wire.status == 200
     assert wire.headers['content-type'].startswith('text/event-stream')
     assert wire.headers['cache-control'] == 'no-cache'
+    assert wire.headers['x-request-id'] == 'req_1'
     assert 'content-length' not in wire.headers and 'content-encoding' not in wire.headers
     assert wire.body == (frame(chunk('a')) + frame('[DONE]')).encode()
     assert h.engine.upstream_closed()
@@ -109,22 +112,22 @@ async def a_second_close_is_harmless(h: Harness) -> None:
     h.engine.next(Scripted(chunks=[frame(chunk('a')), frame('[DONE]')]))
     wire = await h.send(body=STREAM)
     assert wire.status == 200 and h.engine.upstream_closed()
-    await wire.close_again()
-    await wire.close_again()
+    assert await wire.close_again() >= 1
+    assert await wire.close_again() >= 1
     assert h.engine.upstream_closed()
 
     h.engine.reset()
     h.engine.next(Scripted(chunks=[frame(chunk('a')), frame(chunk('b')), frame('[DONE]')]))
     gone = await h.send(body=STREAM, leave_after=1)
-    await gone.close_again()
-    await gone.close_again()
+    assert await gone.close_again() >= 1
+    assert await gone.close_again() >= 1
     assert h.engine.upstream_closed()
 
 
 async def an_oversized_body_is_413_without_draining_it(h: Harness) -> None:
     pulled = 0
 
-    async def endless() -> AsyncIterator[bytes]:
+    def endless() -> Iterator[bytes]:
         nonlocal pulled
         for _ in range(64):
             pulled += 1
