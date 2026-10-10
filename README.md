@@ -512,7 +512,7 @@ setting does not raise: the client answers every call with `invalid_request` (se
 
 The suite normally runs against an in-memory fake engine. `uv run python scripts/contract.py` runs it against the
 real local engine instead, and only an engine in simulator mode (a fake provider; no paid call is ever made). Start
-the engine first (the engine's `scripts/local-up` with both provider keys empty); the run changes nothing there.
+the engine first (the engine's `scripts/local-up` with all provider keys empty); the run changes nothing there.
 Run it with the same `LOCALAPPDATA` (or `XDG_STATE_HOME` / `HOME`) the engine was started with, and, if the engine
 project is not `meridian-engine`, `GAUSSMERIDIAN_LOCAL_PROJECT`. The script refuses (naming variables only, never
 values) unless all of these hold:
@@ -521,12 +521,14 @@ values) unless all of these hold:
   `logs`, never a raw inspect or environment): (S1) exactly one `provider-sim` container runs in the project; (S2)
   exactly one `engine` container runs, owning `127.0.0.1:8180` and `:8181`, which match `MERIDIAN_PUBLIC_URL` and
   `MERIDIAN_ADMIN_URL`; (S3) its provider base URLs are `provider-sim:8184`, `GAUSSMERIDIAN_PROVIDER_SIMULATOR` is
-  `true` and both paid keys equal the public dummy `sim-local-key` (compared inside the docker template, so only match
+  `true` and each of the eight paid keys equals the public dummy `sim-local-key` (compared inside the docker template, so only match
   tokens come back); (S4) its compose `environment_file` label is the env file of the runtime folder checked below (or
   `GAUSSMERIDIAN_ENV_FILE`), or, with no label, the runbook's marker `.sim-started-<container id>` in that folder holds
   the engine's id. A throwaway runtime folder (a redirected `LOCALAPPDATA`) is accepted only because S1 to S4 prove the
   running engine was started from it. Docker missing, or any error, is a refusal;
-- no paid provider key (`GAUSSMERIDIAN_GEMINI_API_KEY`, `GAUSSMERIDIAN_OPENROUTER_API_KEY`) is set in the process
+- no paid provider key (`GAUSSMERIDIAN_GEMINI_API_KEY`, `GAUSSMERIDIAN_OPENROUTER_API_KEY`,
+  `GAUSSMERIDIAN_OPENAI_API_KEY`, `GAUSSMERIDIAN_ANTHROPIC_API_KEY`, `GAUSSMERIDIAN_XAI_API_KEY`,
+  `GAUSSMERIDIAN_DEEPSEEK_API_KEY`, `GAUSSMERIDIAN_MISTRAL_API_KEY`, `GAUSSMERIDIAN_QWEN_API_KEY`) is set in the process
   environment or in any engine env file: the canonical `meridian-engine.env`, the one in `MERIDIAN_RUNTIME_DIR`, and
   the `GAUSSMERIDIAN_ENV_FILE` target are all read. Any character outside printable ASCII and tab anywhere in the
   file (after one leading byte order mark), a lone CR included, is refused: the file cannot be checked. The files

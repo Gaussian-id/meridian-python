@@ -57,7 +57,15 @@ def no_system_proxy(monkeypatch: pytest.MonkeyPatch) -> None:
 
 # -- the env file text ---------------------------------------------------------------------------------------------
 
-BOTH = [GEMINI, OPENROUTER]  # what a text that cannot be checked reports
+NEW_KEYS = [
+    'GAUSSMERIDIAN_OPENAI_API_KEY',
+    'GAUSSMERIDIAN_ANTHROPIC_API_KEY',
+    'GAUSSMERIDIAN_XAI_API_KEY',
+    'GAUSSMERIDIAN_DEEPSEEK_API_KEY',
+    'GAUSSMERIDIAN_MISTRAL_API_KEY',
+    'GAUSSMERIDIAN_QWEN_API_KEY',
+]
+BOTH = [GEMINI, OPENROUTER, *NEW_KEYS]  # what a text that cannot be checked reports: every paid name
 
 # Env file texts and the names the guard must report. A paid name counts as set unless its line is exactly an empty
 # assignment; a character that some reader skips, folds away or breaks a line at means neither name can be checked.
@@ -312,7 +320,7 @@ ROUND_3 = {
     'r3-unclosed-then-hash': f'A="x\n# {GEMINI}=FAKER3P\n',
     'r3-backtick-hash': f'A=`x\n# {GEMINI}=FAKER3Q\n`\n',
 }
-for _name in BOTH:
+for _name in (GEMINI, OPENROUTER):
     for _at, _letter in enumerate(_name):
         if _letter == 'I':
             ROUND_3[f'r3-dotted-{_name[14]}-{_at}'] = f'{_name[:_at]}{DOTTED}{_name[_at + 1 :]}=FAKEDOT\n'
@@ -715,6 +723,28 @@ def test_a_paid_key_in_the_process_environment_is_refused_by_name(tmp_path: Path
     assert refusal({**environ, OPENROUTER: ''}) is None
 
 
+@pytest.mark.parametrize('name', NEW_KEYS)
+def test_a_new_provider_key_in_the_env_file_is_refused_by_name(tmp_path: Path, name: str) -> None:
+    environ, _ = runtime_with(tmp_path, f'A=1\n{name}={SECRET}\n')
+    message = refusal(environ)
+    assert message is not None
+    assert name in message
+    assert SECRET not in message
+    assert paid_keys_in(f'{name}={SECRET}') == [name]
+    assert paid_keys_in(f'{name}=\n') == []
+
+
+@pytest.mark.parametrize('name', NEW_KEYS)
+def test_a_new_provider_key_in_the_process_environment_is_refused_by_name(tmp_path: Path, name: str) -> None:
+    environ, _ = runtime_with(tmp_path)
+    message = refusal({**environ, name.lower(): SECRET})
+    assert message is not None
+    assert name in message
+    assert SECRET not in message
+    assert refusal({**environ, name: ''}) is None
+    assert paid_keys_in_environ({name: 'x'}) == [name]
+
+
 def test_both_sources_are_named_together(tmp_path: Path) -> None:
     environ, _ = runtime_with(tmp_path, f'{OPENROUTER}={SECRET}')
     message = refusal({**environ, GEMINI: SECRET})
@@ -1022,10 +1052,10 @@ def test_the_template_compares_only_the_allowlisted_entries_and_prints_tokens() 
         'GAUSSMERIDIAN_PROVIDER_SIMULATOR',
         'GAUSSMERIDIAN_GEMINI_API_KEY',
         'GAUSSMERIDIAN_OPENROUTER_API_KEY',
+        *NEW_KEYS,
     ]
     assert [entry for _, entry in SIM_ENV if entry.split('=')[0].endswith('_API_KEY')] == [
-        'GAUSSMERIDIAN_GEMINI_API_KEY=sim-local-key',
-        'GAUSSMERIDIAN_OPENROUTER_API_KEY=sim-local-key',
+        f'{name}=sim-local-key' for name in (GEMINI, OPENROUTER, *NEW_KEYS)
     ]
     assert SIM_TEMPLATE.startswith('{{range .Config.Env}}')
     assert '{{if eq . "GAUSSMERIDIAN_PROVIDER_SIMULATOR=true"}}sim_flag {{end}}' in SIM_TEMPLATE
@@ -1084,6 +1114,18 @@ BREAKS: dict[str, tuple[Callable[[FakeDocker], None], str]] = {
     ),
     'no label and no marker': (lambda d: setattr(d, 'label', ''), 'not started from the env file of this runtime'),
 }
+
+
+@pytest.mark.parametrize('name', NEW_KEYS)
+def test_a_new_provider_key_that_is_not_the_public_dummy_is_refused_by_name_only(tmp_path: Path, name: str) -> None:
+    token = name.removeprefix('GAUSSMERIDIAN_').removesuffix('_API_KEY').lower() + '_dummy'
+    environ, folder, docker = stack(tmp_path)
+    docker.tokens.remove(token)
+    reason = simulator_proof(environ, folder, docker)
+    assert reason is not None
+    assert f'missing: {token})' in reason
+    assert refusal(environ, docker) == reason
+    assert 'sim-local-key' not in reason and str(tmp_path) not in reason
 
 
 @pytest.mark.parametrize('name', list(BREAKS))
