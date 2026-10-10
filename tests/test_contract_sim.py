@@ -26,7 +26,9 @@ MODEL = 'gemini-3.8-flash'
 MSG: Any = [{'role': 'user', 'content': 'hello'}]
 PIECES = [f'sim token {n}' for n in range(1, 11)]
 FIXED = ''.join(PIECES)
-REVOKED = ('invalid_api_key', 'key_revoked')
+# The engine keeps a revoked key's hash and answers key_revoked; both key codes must stay hidden from a browser
+REVOKED = ('key_revoked',)
+KEY_CODES = ('invalid_api_key', 'key_revoked')
 
 
 @pytest.fixture(scope='module', autouse=True)
@@ -37,7 +39,12 @@ def canary() -> None:
         {'model': MODEL, 'messages': MSG}
     )
     data = result.data
-    if result.error is not None or data is None or data['choices'][0]['message']['content'] != FIXED:
+    if (
+        result.error is not None
+        or data is None
+        or data['choices'][0]['message']['content'] != FIXED
+        or data['usage']['completion_tokens'] != 10
+    ):
         pytest.exit('The canary failed: the engine did not answer with the simulator reply. Stop and tear down.', 1)
 
 
@@ -225,7 +232,7 @@ async def test_forwarding_with_the_revoked_key_is_the_generic_503_and_the_server
         'service_unavailable',
         False,
     )
-    assert not any(code in out.decode() for code in REVOKED)
+    assert not any(code in out.decode() for code in KEY_CODES)
     direct = await resolve(client.chat.create({'model': MODEL, 'messages': MSG}))
     assert direct.error.code in REVOKED
 
