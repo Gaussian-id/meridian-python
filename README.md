@@ -1,54 +1,74 @@
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/brand/meridian-lockup-light.svg">
+    <img alt="Gauss Meridian" src="assets/brand/meridian-lockup-dark.svg" width="360">
+  </picture>
+</p>
+
 # gauss-meridian (Python)
 
-The Meridian SDK for Python: chat, streaming, provisioning and a forwarding route for the Meridian engine, on httpx.
+The official Python SDK for Gauss Meridian: one API for many AI models, routed by Meridian.
 
-**Status:** private and unpublished (it is not on PyPI); names and the public date are the owner's decision (O47).
-Python 3.10 or later. The suite runs against an in-memory fake engine; the run against a real local engine is
-simulator-only (see [Contract run](#contract-run)).
+**Status:** private and unpublished (it is not on PyPI); version 0.0.0; Python 3.10 or later. Names and the public date
+are the owner's decision (O47). The suite runs against an in-memory fake engine; the run against a real local engine is
+simulator-only (see [Contract run](#contract-run-simulator-only)).
 
 The code examples below are illustrative: they need an engine at `MERIDIAN_URL` and keys in your environment. The test
 suite checks the same calls against its fake engine.
 
+## Contents
+
+- [Install](#install)
+- [Quick start](#quick-start)
+- [Three ways to connect](#three-ways-to-connect)
+- [Response contract](#response-contract)
+- [Streaming](#streaming)
+- [Forwarding a browser's chat through your server](#forwarding-a-browsers-chat-through-your-server)
+- [Admin client](#admin-client)
+- [Retries, timeouts and idempotency](#retries-timeouts-and-idempotency)
+- [Configuration](#configuration)
+- [Contract run (simulator only)](#contract-run-simulator-only)
+- [Development](#development)
+
 ## Install
 
-From a checkout of this repository (there is no package index release yet):
+| Package on PyPI | Import | Python |
+|---|---|---|
+| `gauss-meridian` | `gauss_meridian` | 3.10 or later |
 
 ```sh
-pip install ./meridian-python                    # the core: httpx is its only dependency
-pip install "./meridian-python[fastapi]"         # or [django], or [flask]: each adds only its framework
+pip install gauss-meridian                  # the core: httpx is its only dependency
+pip install "gauss-meridian[fastapi]"       # adds FastAPI (>=0.110) for the forwarding route
+pip install "gauss-meridian[django]"        # adds Django (>=4.2)
+pip install "gauss-meridian[flask]"         # adds Flask (>=3.0)
+```
+
+The package is not published yet, so install it from a checkout of this repository until it is:
+
+```sh
+pip install ./meridian-python                    # from the folder that holds the checkout
+pip install "./meridian-python[fastapi]"         # or [django], or [flask]
 uv add ./meridian-python --extra django
 poetry add ./meridian-python --extras flask
 ```
 
-The distribution is named `gauss-meridian` (`pip install gauss-meridian`, `pip install "gauss-meridian[fastapi]"` once it
-is published) and it installs the import package `gauss_meridian`, so it does not clash with Google's `google-meridian`,
+The distribution installs the import package `gauss_meridian`, so it does not clash with Google's `google-meridian`,
 which installs `meridian`.
 
-The extras pull in `fastapi>=0.110`, `django>=4.2` and `flask>=3.0`. `import gauss_meridian` (and
-`gauss_meridian.forward`, `gauss_meridian.admin`, `gauss_meridian.types`) never imports a framework;
-`import gauss_meridian.flask` without Flask installed raises an `ImportError` that names the extra to install (the same
-for `gauss_meridian.fastapi` and `gauss_meridian.django`).
+`import gauss_meridian` (and `gauss_meridian.forward`, `gauss_meridian.admin`, `gauss_meridian.types`) never imports a
+framework. `import gauss_meridian.flask` without Flask installed raises an `ImportError` that names the extra to
+install (the same for `gauss_meridian.fastapi` and `gauss_meridian.django`).
 
-## Three ways to connect
+## Quick start
 
-1. **The server client** (`Meridian` / `AsyncMeridian`): your server calls the engine with a project key (`gmr_…`).
-2. **A forwarding route** (FastAPI, Django or Flask): your browser code calls a route on your own server, which checks
-   the user with your `authorize` function and adds the key. The key never reaches the browser.
-3. **The engine's API directly**, from your server, with the key from an environment variable:
+Read the URL and the project key (`gmr_...`) from the environment, never from source code:
 
-   ```sh
-   curl "$MERIDIAN_URL/v1/chat/completions" \
-     -H "Authorization: Bearer $MERIDIAN_KEY" \
-     -H "Content-Type: application/json" \
-     -d '{"messages":[{"role":"user","content":"Hello"}]}'
-   ```
+```sh
+export MERIDIAN_URL="https://your-engine.example"   # the engine's public listener
+export MERIDIAN_KEY="..."                           # a project key from your secret store
+```
 
-Never put a key in source code, in a browser bundle or in a repository: read it from the environment.
-
-## Results, not exceptions
-
-Every call returns a `Result`: an `Ok` (`.data` set, `.error` is `None`) or an `Err` (`.error` set, `.data` is `None`).
-API, network and configuration failures never raise.
+A chat call:
 
 ```python
 from gauss_meridian import Meridian
@@ -63,6 +83,18 @@ else:
     print(result.error.code, result.error.message, result.error.request_id)
 ```
 
+A streaming call:
+
+```python
+opened = client.chat.stream({'messages': [{'role': 'user', 'content': 'Tell me a story'}]})
+if opened.error is None:
+    stream = opened.data
+    for chunk in stream:
+        print(chunk.delta, end='')
+    if stream.error is not None:  # read after the loop
+        print(stream.error.code)
+```
+
 The async client is the same API, awaited:
 
 ```python
@@ -72,9 +104,117 @@ async with AsyncMeridian() as client:
     result = await client.chat.create({'messages': [{'role': 'user', 'content': 'Hello'}]})
 ```
 
-`client.models.list()` lists the models. `if result.error is None:` narrows `result.data` under a type checker, and
-`result.request_id` on an `Ok` is the engine's request id. The SDK never fills in a model: without one the engine
-chooses (`meridian/auto`). Request and reply types are in `gauss_meridian.types` (`ChatParams`, `ChatCompletion`, ...).
+`client.models.list()` lists the models. The SDK never fills in a model: without one the engine chooses
+(`meridian/auto`). Request and reply types are in `gauss_meridian.types` (`ChatParams`, `ChatCompletion`, ...).
+
+## Three ways to connect
+
+1. **The server client** (`Meridian` / `AsyncMeridian`): your server calls the engine with a project key (`gmr_...`).
+2. **A forwarding route** (FastAPI, Django or Flask): your browser or mobile code calls a route on your own server,
+   which checks the user with your `authorize` function and adds the key. The key never reaches the browser. See
+   [Forwarding](#forwarding-a-browsers-chat-through-your-server).
+3. **The engine's API directly**, from your server, with the key from an environment variable:
+
+   ```sh
+   curl "$MERIDIAN_URL/v1/chat/completions" \
+     -H "Authorization: Bearer $MERIDIAN_KEY" \
+     -H "Content-Type: application/json" \
+     -d '{"messages":[{"role":"user","content":"Hello"}]}'
+   ```
+
+Never put a key in source code, in a browser bundle or in a repository: read it from the environment.
+
+## Response contract
+
+### Results, not exceptions
+
+Every call, sync or async, returns a `Result`: an `Ok` or an `Err`. API, network and configuration failures never
+raise.
+
+| | `Ok[T]` | `Err` |
+|---|---|---|
+| `.data` | the reply | `None` |
+| `.error` | `None` | a `MeridianError` |
+| `.request_id` | the engine's `x-request-id` for the call, when it had one | not present: read `.error.request_id` |
+
+`Result`, `Ok`, `Err`, `MeridianError`, `ErrorCode` and `ErrorType` are all exported from `gauss_meridian`. Test with
+`if result.error is None:`; a type checker then narrows `result.data` to the reply.
+
+The async client returns the same types from awaited calls (`await client.chat.create(...)`).
+
+### The chat completion
+
+`chat.create` gives an `Ok` whose `.data` is the engine's chat completion (type `ChatCompletion`):
+
+| Field | Meaning |
+|---|---|
+| `id`, `object`, `created`, `model` | the completion's id, its kind, the creation time and the model that answered |
+| `choices[]` | each has `index`, `finish_reason` and a `message` (`role`, `content`, and `reasoning`, `refusal` or `tool_calls` when present) |
+| `usage` | the three token counts: `prompt_tokens`, `completion_tokens`, `total_tokens` |
+
+`usage` holds those three counts and nothing else: no cost or price field leaves the SDK. A stream chunk is a
+`ChatChunk` with `delta` (the text of the piece, `''` when it has none) and `raw` (the engine's chunk as a `dict`).
+
+### The error object
+
+`result.error` is a `MeridianError` (a frozen dataclass):
+
+| Field | Meaning |
+|---|---|
+| `code` | an `ErrorCode`: one of the engine's 28 codes, or the SDK's own `network_error` and `aborted` (table below) |
+| `type` | an `ErrorType`: one of the engine's five (`invalid_request_error`, `authentication_error`, `permission_error`, `rate_limit_error`, `api_error`), or `client_error` for the SDK's own errors, configuration errors included |
+| `message` | a readable message |
+| `status` | the HTTP status (0 when nothing was received) |
+| `retryable` | whether trying again later may help |
+| `request_id` | the engine's id for the request; give it to support with any question about a call |
+| `engine_code` | set only when the engine sent a code this SDK does not know: `code` is then `internal`, and the raw code is also in the message |
+| `retry_after` | the response's `Retry-After` header as sent (delta-seconds or an HTTP date) when it was valid, else `None`. Wait at least that long before trying a `rate_limited` call again yourself |
+
+`code` and `type` are `Literal` unions, so a type checker catches a misspelt code in
+`if result.error.code == 'rate_limited':`. `engine_code` and `retry_after` are not part of an error's `repr` or `==`.
+
+### Error codes
+
+| Code | HTTP status | Retryable |
+|---|---|---|
+| `invalid_request` | 400 | no |
+| `capability_unsupported` | 400 | no |
+| `invalid_api_key` | 401 | no |
+| `key_revoked` | 401 | no |
+| `key_expired` | 401 | no |
+| `invalid_token` | 401 | no |
+| `insufficient_credit` | 402 | no |
+| `project_unavailable` | 403 | no |
+| `organisation_unavailable` | 403 | no |
+| `model_not_allowed` | 403 | no |
+| `byok_required` | 403 | no |
+| `project_host_mismatch` | 403 | no |
+| `permission_denied` | 403 | no |
+| `entitlement_missing` | 403 | no |
+| `model_not_found` | 404 | no |
+| `route_not_found` | 404 | no |
+| `not_found` | 404 | no |
+| `method_not_allowed` | 405 | no |
+| `idempotency_conflict` | 409 | no |
+| `conflict` | 409 | no |
+| `body_too_large` | 413 | no |
+| `rate_limited` | 429 | yes |
+| `hard_limit_reached` | 429 | no |
+| `internal` | 500 | no |
+| `upstream_unavailable` | 502 | yes |
+| `upstream_error` | 502 | no |
+| `service_unavailable` | 503 | yes |
+| `deadline_exceeded` | 504 | yes |
+| `network_error` (SDK) | the real status of an unreadable reply, else 0 | yes |
+| `aborted` (SDK) | 0 | no |
+
+The engine's 28 codes come first. `network_error` means the request failed, a reply could not be read, or a stream
+broke. `aborted` means a stream was cancelled or left early. An engine code marked retryable is still not retryable
+when the engine said `retryable: false`. An unreadable error reply (a proxy page, an empty body) is a `network_error`
+with the real status, retryable for 429 and 5xx. The `type` of an error is `client_error` for the two SDK codes and for
+configuration errors (`invalid_request` with status 0).
+
+### When the client cannot send
 
 A client built with a missing or malformed URL or key (or with both `http_client` and `transport`) is still built; it
 answers every call with an `invalid_request` error of type `client_error` and sends nothing. So does a closed client
@@ -82,9 +222,11 @@ answers every call with an `invalid_request` error of type `client_error` and se
 closed: the message is "The client is closed.". The shared clients the forwarding routes use are rebuilt after a close.
 Don't close a shared client while it is serving requests: closing it ends the calls and streams in flight.
 
-What may raise: building a forwarding helper without a callable `authorize` (or with an unusable `response_type`, or an
-async function as an async view's `client`) raises `TypeError`; Python itself (wrong argument types); and
-`asyncio.CancelledError`, which always propagates after cleanup.
+### What may raise
+
+Building a forwarding helper without a callable `authorize` (or with an unusable `response_type`, or an async function
+as an async view's `client`) raises `TypeError`; so does Python itself (wrong argument types); and
+`asyncio.CancelledError` always propagates after cleanup. Nothing else raises.
 
 ## Streaming
 
@@ -99,10 +241,22 @@ if opened.error is None:
     print(stream.usage)  # the three token counts, once the stream finished
 ```
 
-`stream.text()` reads the whole stream and returns a `Result[str]`. `stream.cancel()` stops it and closes the
-connection; the stream's error is then `aborted`. A stream is read once (with `for`, `text()` or `iter_bytes()`): a
-second read records `aborted` ("The stream was already read."). Iterating gives no chunks, `text()` answers an `Err`
-(never an empty success), and `iter_bytes()` / `aiter_bytes()` give one error frame. Async:
+- **Open:** `chat.stream` returns a `Result`. An `Err` means the call failed before any byte (a bad key, a refusal);
+  an `Ok` holds the stream.
+- **Iterate:** `for chunk in stream` gives `ChatChunk`s. `stream.text()` reads the whole stream and returns a
+  `Result[str]`. `stream.iter_bytes()` gives the engine's events byte for byte, for forwarding.
+- **Cancel:** `stream.cancel()` stops it and closes the connection; the stream's error is then `aborted`.
+- **Usage:** `stream.usage` holds the three token counts once the stream finished (`None` before that). The SDK asks
+  the engine for the usage chunk itself (`stream_options.include_usage`) and owns `stream` and `stream_options`.
+- **A mid-stream error:** `chat.stream` has already returned `Ok`, so the failure shows in `stream.error` after the
+  loop: the engine's error frame as its own code, a broken connection or a frame that is not JSON as `network_error`,
+  a stream that ended without its end marker as `network_error` ("The stream ended before it finished.").
+  `stream.request_id` is the response's request id.
+- **Second-read rule:** a stream is read once (with `for`, `text()` or `iter_bytes()`). A second read records `aborted`
+  ("The stream was already read."). Iterating gives no chunks, `text()` answers an `Err` (never an empty success), and
+  `iter_bytes()` / `aiter_bytes()` give one error frame.
+
+Async:
 
 ```python
 from contextlib import aclosing
@@ -124,49 +278,6 @@ with `break` (or an exception) is closed later by the event loop, so close it yo
 `aclosing(...)` as above, or `await stream.cancel()`. Cancelling the task that iterates an async stream closes the
 connection, records `aborted` and lets the `CancelledError` propagate.
 
-## Errors
-
-`result.error` is a `MeridianError`:
-
-- `code`: one of the engine's 28 codes (`invalid_request`, `invalid_api_key`, `key_revoked`, `key_expired`,
-  `invalid_token`, `insufficient_credit`, `project_unavailable`, `organisation_unavailable`, `model_not_allowed`,
-  `byok_required`, `project_host_mismatch`, `permission_denied`, `entitlement_missing`, `model_not_found`,
-  `route_not_found`, `not_found`, `method_not_allowed`, `capability_unsupported`, `idempotency_conflict`, `conflict`,
-  `body_too_large`, `rate_limited`, `hard_limit_reached`, `internal`, `upstream_unavailable`, `upstream_error`,
-  `service_unavailable`, `deadline_exceeded`), or one of the SDK's own two: `network_error` (the request failed, or a
-  reply could not be read) and `aborted` (a stream was cancelled or left early).
-- `type`: one of the engine's five (`invalid_request_error`, `authentication_error`, `permission_error`,
-  `rate_limit_error`, `api_error`), or `client_error` for the SDK's own errors, including configuration errors
-  (`invalid_request` / `client_error`).
-- `status`: the HTTP status (0 when nothing was received).
-- `retryable`: whether trying again later may help (`rate_limited`, `upstream_unavailable`, `service_unavailable`,
-  `deadline_exceeded` and `network_error`, unless the engine said `retryable: false`).
-- `request_id`: the engine's id for the request; give it to support with any question about a call.
-- `engine_code`: set only when the engine sent a code this SDK does not know. `code` is then `internal`, and the raw
-  code is also in the message.
-- `retry_after`: the response's `Retry-After` header as sent (delta-seconds or an HTTP date) when it was valid, else
-  `None`. Wait at least that long before trying a `rate_limited` call again yourself.
-
-`code` and `type` are typed as `Literal` unions, exported as `gauss_meridian.ErrorCode` and `gauss_meridian.ErrorType`, so a type
-checker catches a misspelt code in `if result.error.code == 'rate_limited':`.
-
-## Retries, timeouts and idempotency
-
-- A call is retried at most twice (`max_retries=`, default 2), and only for the retryable codes above.
-- Retries happen only before the first byte of the reply body is read: never mid-stream.
-- A `Retry-After` of up to 30 seconds is waited for; a longer one is not, and the error is returned at once. A
-  `Retry-After` of 0, in the past or unreadable falls back to backoff with jitter.
-- Each chat call (`create` or `stream`) sends one `idempotency-key`, reused across its retries, so the engine runs it
-  once. Pass your own with `idempotency_key=`: 1 to 255 characters, each visible ASCII (0x21 to 0x7E); `None` or `''`
-  makes one; any other value is refused (`invalid_request`, nothing sent).
-- When a retry finds its key still in use (`idempotency_conflict`, 409) after an earlier attempt failed with anything
-  but `rate_limited`, the earlier attempt's error is returned: that attempt reached the engine.
-- A buffered `chat.create` waits up to 300 seconds for its reply; streams and admin calls wait up to 60 seconds. These
-  are limits per connect, read, write and pool wait, not on the whole call: a stream that keeps sending runs as long as it sends,
-  and a call that is retried waits again on each attempt. `timeout=` (seconds) on the client sets one such limit for
-  every call. Invalid values of `timeout` and `max_retries`
-  (negative, NaN, infinite, `bool`) fall back to the defaults.
-
 ## Forwarding a browser's chat through your server
 
 The route is public and spends your credit, so it is the SDK's security boundary:
@@ -183,6 +294,7 @@ The route is public and spends your credit, so it is the SDK's security boundary
   (`AllowRule(max_tokens_cap=...)`, default 4096); `model` only when you allow it; other options only when you name
   them. `n`, `stream`, `stream_options`, `max_completion_tokens` and `model` are never copied raw: the route sets
   streaming itself from `"stream": true`.
+- **Idempotency keys:** a browser's `idempotency-key` is passed on only when it is 1 to 255 visible ASCII characters; otherwise the SDK makes its own.
 - **What the browser learns:** errors about the end user's own request keep their status and code, and a passed-on
   `rate_limited` carries the engine's `Retry-After`. Errors about your own key, account or credit (`invalid_api_key`,
   `key_revoked`, `key_expired`, `project_unavailable`, `organisation_unavailable`, `project_host_mismatch`,
@@ -303,9 +415,9 @@ app.register_blueprint(forward_blueprint(authorize=authorize))  # POST /api/meri
 Another framework can use `gauss_meridian.forward.Forwarder` / `AsyncForwarder` directly: give it the request's method,
 content type, idempotency key and a chunked body reader, and close the streamed reply on every exit path.
 
-## Admin: provisioning with an integrator key
+## Admin client
 
-`MeridianAdmin` / `AsyncMeridianAdmin` use an integrator key (`gmi_…`) on the engine's admin listener
+`MeridianAdmin` / `AsyncMeridianAdmin` use an integrator key (`gmi_...`) on the engine's admin listener
 (`MERIDIAN_ADMIN_URL`, `MERIDIAN_INTEGRATOR_KEY`). Server side only.
 
 ```python
@@ -340,7 +452,6 @@ The supplier catalogue is not wrapped (it holds only supplier prices), nor are r
   `KeyBody`, `IssuedKey` with `api_key` as a `Secret`, `CredentialMetadata`, `ModelAllowlist`, `CatalogueModelBody`,
   `UsageReport`, `LogPage`, or a list of one); a delete returns `Result[None]`. A type checker flags a misspelt key
   such as `org.data['idd']`.
-
 - **Retries:** reads and deletes retry normally; writes (POST, PUT, PATCH) retry only after `rate_limited`, since a
   repeat could do the work twice. `orgs.create` with a non-blank `external_reference` retries normally (the engine
   replays it). Admin calls send no idempotency key. A delete whose 204 was lost and that is retried may answer
@@ -361,7 +472,43 @@ The supplier catalogue is not wrapped (it holds only supplier prices), nor are r
   bare value (`log.info('%s', key)`, `log.info(key)`), an exception built from it, JSON and structured log
   formatters, `pickle.dumps`, and pytest's line diff of two strings.
 
-## Contract run
+## Retries, timeouts and idempotency
+
+- A call is retried at most twice (`max_retries=`, default 2), and only for the retryable codes above.
+- Retries happen only before the first byte of the reply body is read: never mid-stream.
+- A `Retry-After` of up to 30 seconds is waited for; a longer one is not, and the error is returned at once. A
+  `Retry-After` of 0, in the past or unreadable falls back to backoff with jitter.
+- Each chat call (`create` or `stream`) sends one `idempotency-key`, reused across its retries, so the engine runs it
+  once. Pass your own with `idempotency_key=`: 1 to 255 characters, each visible ASCII (0x21 to 0x7E); `None` or `''`
+  makes one; any other value is refused (`invalid_request`, nothing sent).
+- When a retry finds its key still in use (`idempotency_conflict`, 409) after an earlier attempt failed with anything
+  but `rate_limited`, the earlier attempt's error is returned: that attempt reached the engine.
+- A buffered `chat.create` waits up to 300 seconds for its reply; streams and admin calls wait up to 60 seconds. These
+  are limits per connect, read, write and pool wait, not on the whole call: a stream that keeps sending runs as long as
+  it sends, and a call that is retried waits again on each attempt. `timeout=` (seconds) on the client sets one such
+  limit for every call. Invalid values of `timeout` and `max_retries` (negative, NaN, infinite, `bool`) fall back to
+  the defaults.
+
+## Configuration
+
+| Setting | Where | Default | Meaning |
+|---|---|---|---|
+| `MERIDIAN_URL` | environment, or `Meridian(url, ...)` | none (required) | the engine's public URL (absolute `http` or `https`) |
+| `MERIDIAN_KEY` | environment, or `Meridian(url, key)` | none (required) | a project key (`gmr_...`) |
+| `MERIDIAN_ADMIN_URL` | environment, or `MeridianAdmin(url, ...)` | none (required) | the engine's admin URL |
+| `MERIDIAN_INTEGRATOR_KEY` | environment, or `MeridianAdmin(url, key)` | none (required) | an integrator key (`gmi_...`) |
+| `timeout=` | client option | 60 s (300 s to read a buffered chat reply) | seconds, per connect, read, write and pool wait |
+| `max_retries=` | client option | 2 | retries for the retryable codes |
+| `http_client=` / `transport=` | client option | none | your own `httpx` client or transport (not both) |
+| `idempotency_key=` | `chat.create` / `chat.stream` | generated | 1 to 255 visible ASCII characters |
+| `MERIDIAN` (`URL`, `KEY`) | Django `settings.py` | the environment | settings for the Django forwarding view |
+| `MERIDIAN_URL`, `MERIDIAN_KEY` | Flask `app.config` | the environment | settings for the Flask blueprint |
+
+An argument given as `None` falls back to its environment variable; an explicit `''` does not. A missing or malformed
+setting does not raise: the client answers every call with `invalid_request` (see
+[When the client cannot send](#when-the-client-cannot-send)).
+
+## Contract run (simulator only)
 
 The suite normally runs against an in-memory fake engine. `uv run python scripts/contract.py` runs it against the
 real local engine instead, and only an engine in simulator mode (a fake provider; no paid call is ever made). Start
@@ -430,4 +577,8 @@ uv run python scripts/generate_types.py --check
 ```
 
 The suite runs on Python 3.10 and on the latest Python; `tests/test_package.py` builds the wheel and sdist with
-`uv build` into a temporary directory and checks what they ship.
+`uv build` into a temporary directory and checks what they ship: the package source, `README.md` and `LICENSE` ship,
+and `assets/` does not (the README's logo links are for the repository page only).
+
+The Meridian logo is a Gaussian trademark; the Apache-2.0 licence covers the code, not the logo. The approved lockups
+are in `assets/brand/`.
