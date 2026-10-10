@@ -4,9 +4,11 @@ tokens. The guard has proven the simulator before any test is built; the canary 
 here prints a key."""
 
 import json
+import time
 import uuid
 from typing import Any
 
+import anyio
 import httpx
 import pytest
 from fastapi import FastAPI
@@ -168,8 +170,14 @@ async def test_a_revoked_key_used_directly_is_refused(mode: str, engine: Any) ->
     client = client_with(mode, engine, own.secret)
     assert (await resolve(client.models.list())).error is None
     await own.revoke()
+    # [1] The engine may keep accepting a revoked key for up to 5 s (its key cache), so poll for 8 s
     result = await resolve(client.models.list())
+    deadline = time.monotonic() + 8
+    while result.error is None and time.monotonic() < deadline:
+        await anyio.sleep(0.25)
+        result = await resolve(client.models.list())
     assert result.data is None
+    assert result.error is not None
     assert result.error.status == 401
     assert result.error.code in REVOKED
 
