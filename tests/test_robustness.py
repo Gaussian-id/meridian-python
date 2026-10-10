@@ -197,6 +197,25 @@ async def test_a_chat_reply_over_64_mib_is_refused_without_reading_it_all(mode: 
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize(
+    'scripted',
+    [
+        pytest.param(Scripted(chunks=[b'{"choices": [', b']}'], drop_after=1), id='dropped'),
+        pytest.param(Scripted(chunks=[b'{"choices": [], "a": "', *[b' ' * (1 << 20)] * 80, b'"}']), id='too-large'),
+        pytest.param(Scripted(text='null'), id='null'),
+        pytest.param(Scripted(text='{not json'), id='not-json'),
+    ],
+)
+async def test_a_reply_the_sdk_cannot_use_keeps_the_responses_request_id(
+    mode: str, engine: Any, scripted: Scripted
+) -> None:
+    scripted.headers = {'x-request-id': 'req_hdr'}
+    engine.next(scripted)
+    result = await resolve(make_client(mode, engine, max_retries=0).chat.create({'messages': MSG}))
+    assert (result.error.code, result.error.status, result.error.request_id) == ('network_error', 200, 'req_hdr')
+
+
+@pytest.mark.anyio
 async def test_an_error_body_over_1_mib_is_a_network_error_with_its_status(
     mode: str, engine: Any, clock: list[float]
 ) -> None:

@@ -4,7 +4,7 @@ import codecs
 import re
 
 _LINE_ENDINGS = re.compile(r'\r\n?')
-_BOM = '﻿'
+_BOM = chr(0xFEFF)  # a byte order mark opening the stream is not part of the first event
 
 # One event may be this many characters (about 16 MiB of text) before the stream is failed closed.
 MAX_EVENT_CHARS = 16 * 1024 * 1024
@@ -15,7 +15,8 @@ class EventTooLarge(ValueError):
 
 
 def _data_of(block: str) -> str | None:
-    lines = [line for line in block.split('\n') if line.startswith('data:')]
+    # A line with no colon is a field name with an empty value (SSE), so a bare `data` line is an empty data line
+    lines = [line for line in block.split('\n') if line == 'data' or line.startswith('data:')]
     if not lines:
         return None
     return '\n'.join(line[6:] if line.startswith('data: ') else line[5:] for line in lines)

@@ -149,3 +149,13 @@ def test_an_adapter_without_its_framework_names_the_extra(dist: Path, extra: str
 def test_an_adapter_with_its_framework_imports(dist: Path, extra: str) -> None:
     result = run_wheel(dist, f'import meridian.{extra}\n', block_frameworks=False)
     assert result.returncode == 0, result.stderr
+
+
+def test_the_source_holds_no_invisible_character_and_no_pyright_ignore() -> None:
+    # An invisible character is written as an escape (a reader cannot see a literal BOM), and the source type-checks
+    # without suppressing anything
+    for path in sorted((ROOT / 'src' / 'meridian').rglob('*.py')):
+        text = path.read_text(encoding='utf-8')
+        assert chr(0xFEFF) not in text and chr(0x200B) not in text, path
+        if '_generated' not in path.parts:
+            assert 'pyright: ignore' not in text, path

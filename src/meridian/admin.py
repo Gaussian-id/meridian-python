@@ -8,8 +8,9 @@ an organisation (a person does that in the console).
 Every call returns a `Result` and never raises for an API, network, decode or configuration problem. A client built
 with a missing, malformed or wrong-typed URL or key, with both `http_client` and `transport`, or with either of the
 wrong kind, answers every call with an `invalid_request` / `client_error` and sends nothing. So does a call whose body
-is not a mapping or holds NaN or infinity, or whose `page_size` is not an int. A delete answers `Ok(None)`. A query
-value that is `None` or `''` is left out.
+is not a mapping or holds NaN or infinity, or whose `page_size` is not an int, and so does a closed client. Each result
+is typed with the engine's reply shape (`OrganisationBody`, `ProjectBody`, `IssuedKey`, `LogPage`, ...); a delete
+answers `Ok(None)`. A query value that is `None` or `''` is left out.
 
 Retries follow one rule, decided in the transport from the call itself: a read or a delete is retried normally; every
 write (POST, PUT, PATCH) is retried only on `rate_limited`, because a repeat could do the work twice. The one
@@ -49,7 +50,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Generic, TypedDict, TypeGuard, TypeVar, cast, overload
 from urllib.parse import quote, unquote
 
 import httpx
@@ -61,17 +62,23 @@ from ._transport import AsyncRefusedTransport, AsyncTransport, Call, RefusedTran
 
 if TYPE_CHECKING:
     from ._generated.admin import (
+        CatalogueModelBody,
         CreateOrganisation,
         CreateProject,
+        CredentialMetadata,
         IssueKey,
+        KeyBody,
+        LogPage,
         ModelAllowlist,
+        OrganisationBody,
+        ProjectBody,
         SetCredential,
         UpdateProject,
+        UsageReport,
     )
 
-__all__ = ['AsyncMeridianAdmin', 'MeridianAdmin', 'Secret']
+__all__ = ['AsyncMeridianAdmin', 'IssuedKey', 'MeridianAdmin', 'Secret']
 
-R = TypeVar('R')
 BY_REFERENCE = (
     'by-reference'  # the engine's /v1/orgs/by-reference/{reference} route, which an organisation id would shadow
 )
@@ -90,6 +97,15 @@ class Secret(str):
 
     def __repr__(self) -> str:
         return '[redacted]'
+
+
+class IssuedKey(TypedDict):
+    """The reply of `keys.create`: the engine's `IssuedKey`, with the new key held as a `Secret`."""
+
+    api_key: Secret
+    key_id: str
+    key_prefix: str
+    message: str
 
 
 @dataclass(frozen=True)
@@ -157,19 +173,43 @@ def _delete(path: str | MeridianError) -> _Op:
     return _Op(path if isinstance(path, MeridianError) else Call('DELETE', path, no_content=True))
 
 
+def _is_text(value: object) -> TypeGuard[str]:
+    return isinstance(value, str)
+
+
 def _scoped(path: str, project_id: str, **query: Any) -> _Op:
-    if not isinstance(project_id, str) or not project_id.strip():  # pyright: ignore[reportUnnecessaryIsInstance]
+    if not _is_text(project_id) or not project_id.strip():  # a type checker cannot see a caller's wrong type
         return _Op(_NO_PROJECT)
     return _get(path, {'project_id': project_id, **query})
 
 
-class _Group(Generic[R]):
-    def __init__(self, send: Callable[[_Op], R]) -> None:
+# Each operation's result is typed with the engine's reply shape. Python has no way to say "Result[T] for the sync
+# client, Awaitable[Result[T]] for the async one" in one signature, so every group is generic in its client's mode, and
+# each operation has one overload per mode: the implementation (and the request it builds) is shared.
+
+
+class _Sync:
+    """The mode of MeridianAdmin's groups: an operation returns its Result."""
+
+
+class _Async:
+    """The mode of AsyncMeridianAdmin's groups: an operation returns an awaitable of its Result."""
+
+
+M = TypeVar('M', _Sync, _Async)
+
+
+class _Group(Generic[M]):
+    def __init__(self, send: Callable[[_Op], Any]) -> None:
         self._send = send
 
 
-class _Orgs(_Group[R]):
-    def create(self, body: CreateOrganisation) -> R:
+class _Orgs(_Group[M]):
+    @overload
+    def create(self: _Orgs[_Sync], body: CreateOrganisation) -> Result[OrganisationBody]: ...
+    @overload
+    def create(self: _Orgs[_Async], body: CreateOrganisation) -> Awaitable[Result[OrganisationBody]]: ...
+    def create(self, body: CreateOrganisation) -> Any:
         # The engine replays a repeat by external_reference, so only with one is the call retried like a read
         # (a body that is no mapping is refused by _write)
         reference = body.get('external_reference') if isinstance(cast('object', body), Mapping) else None
@@ -177,83 +217,181 @@ class _Orgs(_Group[R]):
             _write('POST', '/v1/orgs', body, repeatable=isinstance(reference, str) and bool(reference.strip()))
         )
 
-    def get(self, org: str) -> R:
+    @overload
+    def get(self: _Orgs[_Sync], org: str) -> Result[OrganisationBody]: ...
+    @overload
+    def get(self: _Orgs[_Async], org: str) -> Awaitable[Result[OrganisationBody]]: ...
+    def get(self, org: str) -> Any:
         return self._send(_get(_route('/v1/orgs/{}', org)))
 
-    def get_by_reference(self, reference: str) -> R:
+    @overload
+    def get_by_reference(self: _Orgs[_Sync], reference: str) -> Result[OrganisationBody]: ...
+    @overload
+    def get_by_reference(self: _Orgs[_Async], reference: str) -> Awaitable[Result[OrganisationBody]]: ...
+    def get_by_reference(self, reference: str) -> Any:
         return self._send(_get(_route('/v1/orgs/by-reference/{}', reference)))
 
-    def list(self) -> R:
+    @overload
+    def list(self: _Orgs[_Sync]) -> Result[list[OrganisationBody]]: ...
+    @overload
+    def list(self: _Orgs[_Async]) -> Awaitable[Result[list[OrganisationBody]]]: ...
+    def list(self) -> Any:
         return self._send(_get('/v1/orgs'))
 
 
-class _Projects(_Group[R]):
-    def create(self, org: str, body: CreateProject) -> R:
+class _Projects(_Group[M]):
+    @overload
+    def create(self: _Projects[_Sync], org: str, body: CreateProject) -> Result[ProjectBody]: ...
+    @overload
+    def create(self: _Projects[_Async], org: str, body: CreateProject) -> Awaitable[Result[ProjectBody]]: ...
+    def create(self, org: str, body: CreateProject) -> Any:
         return self._send(_write('POST', _route('/v1/orgs/{}/projects', org), body))
 
-    def get(self, org: str, project: str) -> R:
+    @overload
+    def get(self: _Projects[_Sync], org: str, project: str) -> Result[ProjectBody]: ...
+    @overload
+    def get(self: _Projects[_Async], org: str, project: str) -> Awaitable[Result[ProjectBody]]: ...
+    def get(self, org: str, project: str) -> Any:
         return self._send(_get(_route('/v1/orgs/{}/projects/{}', org, project)))
 
-    def list(self, org: str) -> R:
+    @overload
+    def list(self: _Projects[_Sync], org: str) -> Result[list[ProjectBody]]: ...
+    @overload
+    def list(self: _Projects[_Async], org: str) -> Awaitable[Result[list[ProjectBody]]]: ...
+    def list(self, org: str) -> Any:
         return self._send(_get(_route('/v1/orgs/{}/projects', org)))
 
-    def update(self, org: str, project: str, body: UpdateProject) -> R:
+    @overload
+    def update(self: _Projects[_Sync], org: str, project: str, body: UpdateProject) -> Result[ProjectBody]: ...
+    @overload
+    def update(
+        self: _Projects[_Async], org: str, project: str, body: UpdateProject
+    ) -> Awaitable[Result[ProjectBody]]: ...
+    def update(self, org: str, project: str, body: UpdateProject) -> Any:
         return self._send(_write('PATCH', _route('/v1/orgs/{}/projects/{}', org, project), body))
 
-    def delete(self, org: str, project: str) -> R:
+    @overload
+    def delete(self: _Projects[_Sync], org: str, project: str) -> Result[None]: ...
+    @overload
+    def delete(self: _Projects[_Async], org: str, project: str) -> Awaitable[Result[None]]: ...
+    def delete(self, org: str, project: str) -> Any:
         return self._send(_delete(_route('/v1/orgs/{}/projects/{}', org, project)))
 
 
-class _Keys(_Group[R]):
-    def create(self, org: str, project: str, body: IssueKey | None = None) -> R:
+class _Keys(_Group[M]):
+    @overload
+    def create(self: _Keys[_Sync], org: str, project: str, body: IssueKey | None = None) -> Result[IssuedKey]: ...
+    @overload
+    def create(
+        self: _Keys[_Async], org: str, project: str, body: IssueKey | None = None
+    ) -> Awaitable[Result[IssuedKey]]: ...
+    def create(self, org: str, project: str, body: IssueKey | None = None) -> Any:
         """Issue a key. The reply's `api_key` is shown once, as a `Secret`: store it now."""
         path = _route('/v1/orgs/{}/projects/{}/keys', org, project)
         return self._send(_write('POST', path, {} if body is None else body, hides_key=True))
 
-    def list(self, org: str, project: str) -> R:
+    @overload
+    def list(self: _Keys[_Sync], org: str, project: str) -> Result[list[KeyBody]]: ...
+    @overload
+    def list(self: _Keys[_Async], org: str, project: str) -> Awaitable[Result[list[KeyBody]]]: ...
+    def list(self, org: str, project: str) -> Any:
         return self._send(_get(_route('/v1/orgs/{}/projects/{}/keys', org, project)))
 
-    def revoke(self, org: str, project: str, key: str) -> R:
+    @overload
+    def revoke(self: _Keys[_Sync], org: str, project: str, key: str) -> Result[None]: ...
+    @overload
+    def revoke(self: _Keys[_Async], org: str, project: str, key: str) -> Awaitable[Result[None]]: ...
+    def revoke(self, org: str, project: str, key: str) -> Any:
         return self._send(_delete(_route('/v1/orgs/{}/projects/{}/keys/{}', org, project, key)))
 
 
-class _ProviderCredentials(_Group[R]):
-    def list(self, org: str) -> R:
+class _ProviderCredentials(_Group[M]):
+    @overload
+    def list(self: _ProviderCredentials[_Sync], org: str) -> Result[list[CredentialMetadata]]: ...
+    @overload
+    def list(self: _ProviderCredentials[_Async], org: str) -> Awaitable[Result[list[CredentialMetadata]]]: ...
+    def list(self, org: str) -> Any:
         return self._send(_get(_route('/v1/orgs/{}/provider-credentials', org)))
 
-    def put(self, org: str, provider: str, body: SetCredential) -> R:
+    @overload
+    def put(
+        self: _ProviderCredentials[_Sync], org: str, provider: str, body: SetCredential
+    ) -> Result[CredentialMetadata]: ...
+    @overload
+    def put(
+        self: _ProviderCredentials[_Async], org: str, provider: str, body: SetCredential
+    ) -> Awaitable[Result[CredentialMetadata]]: ...
+    def put(self, org: str, provider: str, body: SetCredential) -> Any:
         """Store or replace the organisation's key for a provider. The SDK holds a text `credential` as a `Secret`
         (in its own copy of the body; yours is untouched) and sends it unchanged."""
         path = _route('/v1/orgs/{}/provider-credentials/{}', org, provider)
         return self._send(_write('PUT', path, _with_secret(body)))
 
-    def delete(self, org: str, provider: str) -> R:
+    @overload
+    def delete(self: _ProviderCredentials[_Sync], org: str, provider: str) -> Result[None]: ...
+    @overload
+    def delete(self: _ProviderCredentials[_Async], org: str, provider: str) -> Awaitable[Result[None]]: ...
+    def delete(self, org: str, provider: str) -> Any:
         return self._send(_delete(_route('/v1/orgs/{}/provider-credentials/{}', org, provider)))
 
 
-class _ProjectModels(_Group[R]):
-    def get(self, org: str, project: str) -> R:
+class _ProjectModels(_Group[M]):
+    @overload
+    def get(self: _ProjectModels[_Sync], org: str, project: str) -> Result[ModelAllowlist]: ...
+    @overload
+    def get(self: _ProjectModels[_Async], org: str, project: str) -> Awaitable[Result[ModelAllowlist]]: ...
+    def get(self, org: str, project: str) -> Any:
         return self._send(_get(_route('/v1/orgs/{}/projects/{}/models', org, project)))
 
-    def put(self, org: str, project: str, body: ModelAllowlist) -> R:
+    @overload
+    def put(self: _ProjectModels[_Sync], org: str, project: str, body: ModelAllowlist) -> Result[ModelAllowlist]: ...
+    @overload
+    def put(
+        self: _ProjectModels[_Async], org: str, project: str, body: ModelAllowlist
+    ) -> Awaitable[Result[ModelAllowlist]]: ...
+    def put(self, org: str, project: str, body: ModelAllowlist) -> Any:
         return self._send(_write('PUT', _route('/v1/orgs/{}/projects/{}/models', org, project), body))
 
 
-class _Models(_Group[R]):
-    def list(self) -> R:
+class _Models(_Group[M]):
+    @overload
+    def list(self: _Models[_Sync]) -> Result[list[CatalogueModelBody]]: ...
+    @overload
+    def list(self: _Models[_Async]) -> Awaitable[Result[list[CatalogueModelBody]]]: ...
+    def list(self) -> Any:
         return self._send(_get('/v1/models'))
 
-    def get(self, model: str) -> R:
+    @overload
+    def get(self: _Models[_Sync], model: str) -> Result[CatalogueModelBody]: ...
+    @overload
+    def get(self: _Models[_Async], model: str) -> Awaitable[Result[CatalogueModelBody]]: ...
+    def get(self, model: str) -> Any:
         return self._send(_get(_route('/v1/models/{}', model)))
 
 
-class _Analytics(_Group[R]):
-    def usage(self, project_id: str, *, from_: str | None = None, to: str | None = None) -> R:
+class _Analytics(_Group[M]):
+    @overload
+    def usage(
+        self: _Analytics[_Sync], project_id: str, *, from_: str | None = None, to: str | None = None
+    ) -> Result[UsageReport]: ...
+    @overload
+    def usage(
+        self: _Analytics[_Async], project_id: str, *, from_: str | None = None, to: str | None = None
+    ) -> Awaitable[Result[UsageReport]]: ...
+    def usage(self, project_id: str, *, from_: str | None = None, to: str | None = None) -> Any:
         return self._send(_scoped('/v1/analytics/usage', project_id, **{'from': from_, 'to': to}))
 
 
-class _Logs(_Group[R]):
-    def list(self, project_id: str, *, page_size: int | None = None, cursor: str | None = None) -> R:
+class _Logs(_Group[M]):
+    @overload
+    def list(
+        self: _Logs[_Sync], project_id: str, *, page_size: int | None = None, cursor: str | None = None
+    ) -> Result[LogPage]: ...
+    @overload
+    def list(
+        self: _Logs[_Async], project_id: str, *, page_size: int | None = None, cursor: str | None = None
+    ) -> Awaitable[Result[LogPage]]: ...
+    def list(self, project_id: str, *, page_size: int | None = None, cursor: str | None = None) -> Any:
         size = cast('object', page_size)
         if size is not None and (isinstance(size, bool) or not isinstance(size, int)):
             return self._send(_Op(_BAD_PAGE_SIZE))
@@ -302,19 +440,24 @@ class MeridianAdmin:
                 base, token, timeout=timeout, max_retries=max_retries, http_client=http_client, transport=transport
             )
         )
-        self.orgs: _Orgs[Result[Any]] = _Orgs(self._send)
-        self.projects: _Projects[Result[Any]] = _Projects(self._send)
-        self.keys: _Keys[Result[Any]] = _Keys(self._send)
-        self.provider_credentials: _ProviderCredentials[Result[Any]] = _ProviderCredentials(self._send)
-        self.project_models: _ProjectModels[Result[Any]] = _ProjectModels(self._send)
-        self.models: _Models[Result[Any]] = _Models(self._send)
-        self.analytics: _Analytics[Result[Any]] = _Analytics(self._send)
-        self.logs: _Logs[Result[Any]] = _Logs(self._send)
+        self.orgs: _Orgs[_Sync] = _Orgs(self._send)
+        self.projects: _Projects[_Sync] = _Projects(self._send)
+        self.keys: _Keys[_Sync] = _Keys(self._send)
+        self.provider_credentials: _ProviderCredentials[_Sync] = _ProviderCredentials(self._send)
+        self.project_models: _ProjectModels[_Sync] = _ProjectModels(self._send)
+        self.models: _Models[_Sync] = _Models(self._send)
+        self.analytics: _Analytics[_Sync] = _Analytics(self._send)
+        self.logs: _Logs[_Sync] = _Logs(self._send)
 
     def _send(self, op: _Op) -> Result[Any]:
         if isinstance(op.call, MeridianError):
             return Err(op.call)
         return _finish(self._transport.json(op.call), op.hides_key)
+
+    @property
+    def is_closed(self) -> bool:
+        """True once `close()` ran: every call then answers `invalid_request` ("The client is closed.")."""
+        return self._transport.is_closed
 
     def close(self) -> None:
         self._transport.close()
@@ -349,19 +492,24 @@ class AsyncMeridianAdmin:
                 base, token, timeout=timeout, max_retries=max_retries, http_client=http_client, transport=transport
             )
         )
-        self.orgs: _Orgs[Awaitable[Result[Any]]] = _Orgs(self._send)
-        self.projects: _Projects[Awaitable[Result[Any]]] = _Projects(self._send)
-        self.keys: _Keys[Awaitable[Result[Any]]] = _Keys(self._send)
-        self.provider_credentials: _ProviderCredentials[Awaitable[Result[Any]]] = _ProviderCredentials(self._send)
-        self.project_models: _ProjectModels[Awaitable[Result[Any]]] = _ProjectModels(self._send)
-        self.models: _Models[Awaitable[Result[Any]]] = _Models(self._send)
-        self.analytics: _Analytics[Awaitable[Result[Any]]] = _Analytics(self._send)
-        self.logs: _Logs[Awaitable[Result[Any]]] = _Logs(self._send)
+        self.orgs: _Orgs[_Async] = _Orgs(self._send)
+        self.projects: _Projects[_Async] = _Projects(self._send)
+        self.keys: _Keys[_Async] = _Keys(self._send)
+        self.provider_credentials: _ProviderCredentials[_Async] = _ProviderCredentials(self._send)
+        self.project_models: _ProjectModels[_Async] = _ProjectModels(self._send)
+        self.models: _Models[_Async] = _Models(self._send)
+        self.analytics: _Analytics[_Async] = _Analytics(self._send)
+        self.logs: _Logs[_Async] = _Logs(self._send)
 
     async def _send(self, op: _Op) -> Result[Any]:
         if isinstance(op.call, MeridianError):
             return Err(op.call)
         return _finish(await self._transport.json(op.call), op.hides_key)
+
+    @property
+    def is_closed(self) -> bool:
+        """True once `aclose()` ran: every call then answers `invalid_request` ("The client is closed.")."""
+        return self._transport.is_closed
 
     async def aclose(self) -> None:
         await self._transport.aclose()

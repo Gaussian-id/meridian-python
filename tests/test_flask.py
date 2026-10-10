@@ -20,6 +20,7 @@ from meridian.flask import MeridianExtension, forward_blueprint, meridian_client
 from meridian.forward import ReplyBody
 from tests.support.adapter_contract import CHAT, CHECKS, MESSAGES, STREAM, Wire, allow
 from tests.support.fake_engine import Scripted, chunk, engine_error, frame
+from tests.support.recorder import Recorder
 
 pytestmark = [pytest.mark.anyio, pytest.mark.fake_only]
 ROUTE = '/api/meridian/chat'
@@ -310,6 +311,16 @@ def test_the_blueprints_default_client_is_meridian_client(engine: Any, monkeypat
     monkeypatch.setattr(meridian.flask, 'meridian_client', stand_in)
     r = app_with(forward_blueprint(authorize=allow)).test_client().post(ROUTE, json={'messages': MESSAGES})
     assert r.status_code == 200 and len(made) == 1 and len(engine.requests) == 1
+
+
+def test_a_closed_config_client_is_replaced_so_the_route_keeps_answering(monkeypatch: pytest.MonkeyPatch) -> None:
+    recorder = Recorder(monkeypatch)
+    app = app_with(forward_blueprint(authorize=allow))
+    configure(app, {'MERIDIAN_URL': 'http://flask-closed.engine.test', 'MERIDIAN_KEY': 'gmr_' + '8' * 64})
+    with app.app_context(), meridian_client() as client:
+        assert client.chat.create({'messages': cast('Any', MESSAGES)}).error is None
+    r = app.test_client().post(ROUTE, json={'messages': MESSAGES})
+    assert r.status_code == 200 and len(recorder.senders) == 2
 
 
 def test_outside_an_app_the_client_refuses_rather_than_raises() -> None:

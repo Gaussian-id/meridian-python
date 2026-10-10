@@ -72,7 +72,9 @@ async with AsyncMeridian() as client:
 chooses (`meridian/auto`). Request and reply types are in `meridian.types` (`ChatParams`, `ChatCompletion`, ...).
 
 A client built with a missing or malformed URL or key (or with both `http_client` and `transport`) is still built; it
-answers every call with an `invalid_request` error of type `client_error` and sends nothing.
+answers every call with an `invalid_request` error of type `client_error` and sends nothing. So does a closed client
+(`client.is_closed`, after `close()` / `aclose()` or its `with` block), and a client whose own `http_client` you
+closed: the message is "The client is closed.". The shared clients the forwarding routes use are rebuilt after a close.
 
 What may raise: building a forwarding helper without a callable `authorize` (or with an unusable `response_type`, or an
 async function as an async view's `client`) raises `TypeError`; Python itself (wrong argument types); and
@@ -92,18 +94,29 @@ if opened.error is None:
 ```
 
 `stream.text()` reads the whole stream and returns a `Result[str]`. `stream.cancel()` stops it and closes the
-connection; the stream's error is then `aborted`. A stream is read once. Async:
+connection; the stream's error is then `aborted`. A stream is read once (with `for`, `text()` or `iter_bytes()`): any
+second read gives nothing and records `aborted` ("The stream was already read."), so `text()` answers an `Err`, never
+an empty success. Async:
 
 ```python
+from contextlib import aclosing
+
 opened = await client.chat.stream({'messages': [{'role': 'user', 'content': 'Hi'}]})
 if opened.error is None:
-    async for chunk in opened.data:
-        print(chunk.delta, end='')
-    # or: text = await opened.data.text();  await opened.data.cancel()
+    stream = opened.data
+    async with aclosing(stream.__aiter__()) as chunks:
+        async for chunk in chunks:
+            print(chunk.delta, end='')
+            if chunk.delta.endswith('.'):
+                break
+    print(stream.error)  # final: the iteration is closed
+    # or: text = await stream.text();  await stream.cancel()
 ```
 
-Cancelling the task that iterates an async stream closes the connection, records `aborted` and lets the
-`CancelledError` propagate.
+An async stream's `.error` is final only once its iteration is closed. A loop that runs to the end closes it; one left
+with `break` (or an exception) is closed later by the event loop, so close it yourself first: iterate inside
+`aclosing(...)` as above, or `await stream.cancel()`. Cancelling the task that iterates an async stream closes the
+connection, records `aborted` and lets the `CancelledError` propagate.
 
 ## Errors
 
@@ -125,6 +138,11 @@ Cancelling the task that iterates an async stream closes the connection, records
 - `request_id`: the engine's id for the request; give it to support with any question about a call.
 - `engine_code`: set only when the engine sent a code this SDK does not know. `code` is then `internal`, and the raw
   code is also in the message.
+- `retry_after`: the response's `Retry-After` header as sent (delta-seconds or an HTTP date) when it was valid, else
+  `None`. Wait at least that long before trying a `rate_limited` call again yourself.
+
+`code` and `type` are typed as `Literal` unions, exported as `meridian.ErrorCode` and `meridian.ErrorType`, so a type
+checker catches a misspelt code in `if result.error.code == 'rate_limited':`.
 
 ## Retries, timeouts and idempotency
 
@@ -137,8 +155,10 @@ Cancelling the task that iterates an async stream closes the connection, records
   makes one; any other value is refused (`invalid_request`, nothing sent).
 - When a retry finds its key still in use (`idempotency_conflict`, 409) after an earlier attempt failed with anything
   but `rate_limited`, the earlier attempt's error is returned: that attempt reached the engine.
-- A buffered `chat.create` waits up to 300 seconds for its reply; streams and admin calls wait up to 60 seconds.
-  `timeout=` (seconds) on the client sets one limit for every call. Invalid values of `timeout` and `max_retries`
+- A buffered `chat.create` waits up to 300 seconds for its reply; streams and admin calls wait up to 60 seconds. These
+  are limits per read (and per connect), not on the whole call: a stream that keeps sending runs as long as it sends,
+  and a call that is retried waits again on each attempt. `timeout=` (seconds) on the client sets one such limit for
+  every call. Invalid values of `timeout` and `max_retries`
   (negative, NaN, infinite, `bool`) fall back to the defaults.
 
 ## Forwarding a browser's chat through your server
@@ -218,6 +238,8 @@ a client on: pass `forward_route(client=...)` there.
 
 ```python
 # settings.py: optional, MERIDIAN_URL / MERIDIAN_KEY from the environment are used otherwise
+import os
+
 MERIDIAN = {'URL': os.environ['MERIDIAN_URL'], 'KEY': os.environ['MERIDIAN_KEY']}
 
 # urls.py
@@ -233,7 +255,7 @@ def authorize(request):
 urlpatterns = [path('api/meridian/chat', forward_view(authorize=authorize))]
 ```
 
-- `forward_view` is for WSGI. `async_forward_view` is for ASGI only (under WSGI it answers a 500 saying so); its
+- `forward_view` is for WSGI. `async_forward_view` is for ASGI only (under WSGI it answers the generic 503); its
   `authorize` may be async (use `await request.auser()` there). Noticing a browser that leaves mid-stream needs
   Django 5.0 or later; the sync view works from Django 4.2.
 - The body is read in chunks, never through `request.body`, so `DATA_UPLOAD_MAX_MEMORY_SIZE` does not apply. Under
@@ -307,6 +329,11 @@ It wraps 21 operations:
 | `logs` | `list` |
 
 The supplier catalogue is not wrapped (it holds only supplier prices), nor are renaming or deleting an organisation.
+
+- **Typed results:** each call returns a `Result` of the engine's reply shape (`OrganisationBody`, `ProjectBody`,
+  `KeyBody`, `IssuedKey` with `api_key` as a `Secret`, `CredentialMetadata`, `ModelAllowlist`, `CatalogueModelBody`,
+  `UsageReport`, `LogPage`, or a list of one); a delete returns `Result[None]`. A type checker flags a misspelt key
+  such as `org.data['idd']`.
 
 - **Retries:** reads and deletes retry normally; writes (POST, PUT, PATCH) retry only after `rate_limited`, since a
   repeat could do the work twice. `orgs.create` with a non-blank `external_reference` retries normally (the engine

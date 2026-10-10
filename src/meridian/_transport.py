@@ -62,6 +62,8 @@ _IDEMPOTENCY_KEY = re.compile(r'[!-~]{1,255}')
 # What building or sending a request may raise that becomes an Err: a body or URL that cannot be encoded (TypeError,
 # ValueError, which includes UnicodeError), params too deep to encode (RecursionError)
 _SEND_ERRORS = (httpx.HTTPError, httpx.InvalidURL, TypeError, ValueError, RecursionError)
+# Every call on a closed client (the SDK's, or the httpx client the caller passed in) answers this; nothing is sent
+CLOSED = config_error('The client is closed.')
 
 
 @dataclass(frozen=True)
@@ -228,14 +230,14 @@ class _Shared:
         return replace(error, retry_after=valid_retry_after(retry_after)), retry_after
 
     @staticmethod
-    def dropped(response: httpx.Response) -> Err:
-        message = 'The connection dropped while reading the response body.'
-        return Err(client_error('network_error', message, response.status_code))
+    def unusable(response: httpx.Response, message: str) -> Err:
+        """A reply the SDK cannot use: a network error with its status and its header's request id (when valid)."""
+        request_id = valid_request_id(response.headers.get('x-request-id'))
+        return Err(client_error('network_error', message, response.status_code, request_id))
 
     @staticmethod
-    def too_large(response: httpx.Response) -> Err:
-        message = 'The reply was larger than the SDK accepts.'
-        return Err(client_error('network_error', message, response.status_code))
+    def dropped(response: httpx.Response) -> Err:
+        return _Shared.unusable(response, 'The connection dropped while reading the response body.')
 
     @staticmethod
     def take(data: bytearray, piece: bytes, cap: int) -> bool:
@@ -248,8 +250,7 @@ class _Shared:
         """A 204: nothing to read, and an answer only for the call that expects it."""
         if call.no_content:
             return Ok(None, request_id=response.headers.get('x-request-id'))
-        message = 'The engine answered with no content, which this call does not expect.'
-        return Err(client_error('network_error', message, response.status_code))
+        return _Shared.unusable(response, 'The engine answered with no content, which this call does not expect.')
 
     @staticmethod
     def decode(call: Call, response: httpx.Response, raw: bytes | None) -> Result[Any]:
@@ -257,14 +258,12 @@ class _Shared:
         # The message does not say which of the last two: a body too deep to decode is not known to be invalid JSON
         status, header_id = response.status_code, response.headers.get('x-request-id')
         if raw is None:
-            return _Shared.too_large(response)
+            return _Shared.unusable(response, 'The reply was larger than the SDK accepts.')
         data: Any = load_json(raw.decode('utf-8', 'replace'))
         if data is NOT_JSON:
-            return Err(
-                client_error('network_error', 'The response could not be decoded.', status, valid_request_id(header_id))
-            )
+            return _Shared.unusable(response, 'The response could not be decoded.')
         if data is None:  # a literal null is nothing: no call takes it for a result
-            return Err(client_error('network_error', 'The response was empty (JSON null).', status))
+            return _Shared.unusable(response, 'The response was empty (JSON null).')
 
         # [2] A reply that says `error` is no result, whatever else it holds: every result is an object without one,
         # and a case variant of a member the SDK reads is never judged. The error's own request id is kept when it
@@ -273,9 +272,11 @@ class _Shared:
         if error is not None:
             own: Any = cast('dict[str, Any]', error).get('request_id') if isinstance(error, dict) else None
             message = "The engine's reply carried an error instead of a result."
-            return Err(client_error('network_error', message, status, valid_request_id(own) or header_id))
+            return Err(
+                client_error('network_error', message, status, valid_request_id(own) or valid_request_id(header_id))
+            )
         if call.object_body and not isinstance(data, dict):
-            return Err(client_error('network_error', 'The response was not a JSON object.', status))
+            return _Shared.unusable(response, 'The response was not a JSON object.')
         return Ok[Any](None if call.no_content else data, request_id=header_id)
 
 
@@ -293,13 +294,22 @@ class SyncTransport:
         self._shared = _Shared(base_url, key, timeout, max_retries)
         self._owns = http_client is None
         self._client = http_client or httpx.Client(transport=transport)
+        self._closed = False
+
+    @property
+    def is_closed(self) -> bool:
+        return self._closed
 
     def _attempt(self, call: Call) -> tuple[httpx.Response | None, MeridianError | None, str | None]:
-        # [1] Send, keeping the body unread
+        # [1] Send, keeping the body unread; httpx raises RuntimeError for a send on a client that is closed
         try:
             response = self._client.send(self._shared.request(self._client, call), stream=True)
         except _SEND_ERRORS as exc:
             return None, self._shared.failure(exc, call), None
+        except RuntimeError:
+            if not self._client.is_closed:
+                raise
+            return None, CLOSED, None
         if response.is_success:
             return response, None, None
 
@@ -323,7 +333,11 @@ class SyncTransport:
         return bytes(data)
 
     def open(self, call: Call) -> Result[httpx.Response]:
-        # [1] Attempt, and wait as _Attempts says between failures; the same Call (and key) every time
+        # [1] Nothing is sent on a closed client
+        if self._closed or self._client.is_closed:
+            return Err(CLOSED)
+
+        # [2] Attempt, and wait as _Attempts says between failures; the same Call (and key) every time
         attempts = _Attempts(call, self._shared.max_retries)
         while True:
             response, error, retry_after = self._attempt(call)
@@ -357,6 +371,7 @@ class SyncTransport:
             response.close()
 
     def close(self) -> None:
+        self._closed = True
         if self._owns:
             self._client.close()
 
@@ -377,13 +392,22 @@ class AsyncTransport:
         self._shared = _Shared(base_url, key, timeout, max_retries)
         self._owns = http_client is None
         self._client = http_client or httpx.AsyncClient(transport=transport)
+        self._closed = False
+
+    @property
+    def is_closed(self) -> bool:
+        return self._closed
 
     async def _attempt(self, call: Call) -> tuple[httpx.Response | None, MeridianError | None, str | None]:
-        # [1] Send, keeping the body unread
+        # [1] Send, keeping the body unread; httpx raises RuntimeError for a send on a client that is closed
         try:
             response = await self._client.send(self._shared.request(self._client, call), stream=True)
         except _SEND_ERRORS as exc:
             return None, self._shared.failure(exc, call), None
+        except RuntimeError:
+            if not self._client.is_closed:
+                raise
+            return None, CLOSED, None
         if response.is_success:
             return response, None, None
 
@@ -407,7 +431,11 @@ class AsyncTransport:
         return bytes(data)
 
     async def open(self, call: Call) -> Result[httpx.Response]:
-        # [1] Attempt, and wait as _Attempts says between failures; a CancelledError in the wait propagates
+        # [1] Nothing is sent on a closed client
+        if self._closed or self._client.is_closed:
+            return Err(CLOSED)
+
+        # [2] Attempt, and wait as _Attempts says between failures; a CancelledError in the wait propagates
         attempts = _Attempts(call, self._shared.max_retries)
         while True:
             response, error, retry_after = await self._attempt(call)
@@ -441,37 +469,43 @@ class AsyncTransport:
             await response.aclose()
 
     async def aclose(self) -> None:
+        self._closed = True
         if self._owns:
             await self._client.aclose()
 
 
 class RefusedTransport:
-    """Every call answers the same configuration error; nothing is sent."""
+    """Every call answers the same configuration error (once closed, CLOSED); nothing is sent."""
 
     def __init__(self, error: MeridianError) -> None:
         self._error = error
+        self.is_closed = False
 
     def open(self, call: Call) -> Result[Any]:
-        return Err(self._error)
+        return Err(CLOSED if self.is_closed else self._error)
 
     def json(self, call: Call) -> Result[Any]:
-        return Err(self._error)
+        return self.open(call)
 
     def close(self) -> None:
-        return None
+        self.is_closed = True
 
 
 class AsyncRefusedTransport:
     """The async twin of RefusedTransport."""
 
     def __init__(self, error: MeridianError) -> None:
-        self._error = error
+        self._refused = RefusedTransport(error)
+
+    @property
+    def is_closed(self) -> bool:
+        return self._refused.is_closed
 
     async def open(self, call: Call) -> Result[Any]:
-        return Err(self._error)
+        return self._refused.open(call)
 
     async def json(self, call: Call) -> Result[Any]:
-        return Err(self._error)
+        return self._refused.open(call)
 
     async def aclose(self) -> None:
-        return None
+        self._refused.close()

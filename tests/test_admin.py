@@ -975,10 +975,29 @@ WRITE_OPS = {
 async def test_a_body_that_is_not_a_mapping_is_refused_with_nothing_sent(
     mode: str, engine: Any, dotted: str, body: Any
 ) -> None:
-    if dotted == 'keys.create' and body is None:  # no body is an empty one
-        return
     result = await call(admin(mode, engine), dotted, *WRITE_OPS[dotted], body)
+    if dotted == 'keys.create' and body is None:  # no body is an empty one, and is sent
+        assert result.error is None and engine.bodies() == [{}]
+        return
     assert (result.error.code, result.error.type, result.error.retryable) == ('invalid_request', 'client_error', False)
+    assert engine.requests == []
+
+
+async def test_a_closed_admin_client_answers_every_call_with_an_error_value_and_sends_nothing(
+    mode: str, engine: Any
+) -> None:
+    client = admin(mode, engine)
+    await resolve(client.close() if mode == 'sync' else client.aclose())
+    assert client.is_closed
+    for dotted in OPS:
+        result = await call(client, dotted, *OPS[dotted])
+        error = result.error
+        assert (error.code, error.type, error.retryable, error.message) == (
+            'invalid_request',
+            'client_error',
+            False,
+            'The client is closed.',
+        )
     assert engine.requests == []
 
 

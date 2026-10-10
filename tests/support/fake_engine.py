@@ -125,8 +125,16 @@ def completion(content: str = 'hello', model: str = 'gemini-3.8-flash', **usage:
 
 
 class _Body(httpx.SyncByteStream, httpx.AsyncByteStream):
-    def __init__(self, parts: list[bytes], drop_after: int | None, hang: bool, fail_after: int | None = None) -> None:
+    def __init__(
+        self,
+        parts: list[bytes],
+        drop_after: int | None,
+        hang: bool,
+        fail_after: int | None = None,
+        hanging: asyncio.Event | None = None,
+    ) -> None:
         self._parts, self._drop_after, self._hang, self._fail_after = parts, drop_after, hang, fail_after
+        self._hanging = hanging  # set once a hanging body waits for a part that never comes
         self.closed = False  # the upstream connection was closed by the client
         self.read = 0  # parts handed to the client so far
 
@@ -154,6 +162,8 @@ class _Body(httpx.SyncByteStream, httpx.AsyncByteStream):
             self.read += 1
             yield part
         if self._hang:
+            if self._hanging is not None:
+                self._hanging.set()
             await asyncio.sleep(3600)
 
 
@@ -168,6 +178,8 @@ class FakeEngine:
         self.requests: list[httpx.Request] = []
         self._queue: list[Scripted] = []
         self._bodies: list[_Body] = []
+        # Set when a hanging stream (Scripted.hang) has handed over its parts and waits: a read is now blocked in it
+        self.hanging = asyncio.Event()
         self.transport = httpx.MockTransport(self._handle)
 
     def next(self, *answers: Scripted) -> None:
@@ -205,7 +217,7 @@ class FakeEngine:
         if answer.chunks is not None:
             parts = [c.encode() if isinstance(c, str) else c for c in answer.chunks]
             headers.setdefault('content-type', 'text/event-stream')
-            body = _Body(parts, answer.drop_after, answer.hang, answer.fail_after)
+            body = _Body(parts, answer.drop_after, answer.hang, answer.fail_after, self.hanging)
             self._bodies.append(body)
             return httpx.Response(answer.status, headers=headers, stream=body, request=request)
         if answer.json is not None:

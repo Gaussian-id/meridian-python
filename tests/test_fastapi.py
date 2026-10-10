@@ -3,6 +3,7 @@ pyright (it is typed against `httpx2`, which is not a dependency) and cannot mak
 
 from __future__ import annotations
 
+import inspect
 import json
 import time
 from collections.abc import AsyncIterator, Callable, Iterator, Mapping
@@ -22,6 +23,7 @@ from meridian.fastapi import forward_route, meridian_client
 from meridian.forward import AsyncReplyBody
 from tests.support.adapter_contract import CHAT, CHECKS, STREAM, Wire, allow
 from tests.support.fake_engine import Scripted, chunk, engine_error, frame
+from tests.support.recorder import Recorder
 
 pytestmark = [pytest.mark.anyio, pytest.mark.fake_only]
 MSG = [{'role': 'user', 'content': 'hi'}]
@@ -232,6 +234,10 @@ def test_a_coroutine_function_client_is_refused_at_construction() -> None:
             forward_route(authorize=allow, client=cast('Any', factory))
 
 
+@pytest.mark.skipif(
+    'scope' not in inspect.signature(Depends).parameters,
+    reason='Depends(scope=...) came with FastAPI 0.121; older versions run a yield dependency exit after the response',
+)
 async def test_a_response_fastapi_never_sends_still_closes_upstream(engine: Any) -> None:
     async def teardown_fails() -> AsyncIterator[None]:
         yield
@@ -350,6 +356,18 @@ async def test_the_default_client_is_the_shared_one(monkeypatch: pytest.MonkeyPa
         status, _, body = await drive(app, method='GET', path='/who', content_type=None, body=b'')
         assert status == 200 and json.loads(body) == {'shared': True}
     assert seen[0] is seen[1]
+
+
+async def test_a_closed_shared_client_is_replaced_so_the_route_keeps_answering(monkeypatch: pytest.MonkeyPatch) -> None:
+    recorder = Recorder(monkeypatch)
+    monkeypatch.setenv('MERIDIAN_URL', 'http://fastapi-closed.engine.test')
+    monkeypatch.setenv('MERIDIAN_KEY', 'gmr_' + '8' * 64)
+    app = FastAPI()
+    app.post('/chat')(forward_route(authorize=allow))
+    async with await meridian_client() as client:
+        assert (await client.chat.create({'messages': cast('Any', MSG)})).error is None
+    status, _, _ = await drive(app)
+    assert status == 200 and len(recorder.senders) == 2
 
 
 async def test_get_is_405_with_allow(engine: Any) -> None:

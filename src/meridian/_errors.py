@@ -1,12 +1,51 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
-from typing import Any, Final, Generic, TypeVar, Union, cast
+from typing import Any, Final, Generic, Literal, TypeGuard, TypeVar, Union, cast
 
 T = TypeVar('T')
+
+# Every code a MeridianError can carry: the engine's 28 (the pinned ErrorBody enum) and the SDK's own two
+ErrorCode = Literal[
+    'invalid_request',
+    'invalid_api_key',
+    'key_revoked',
+    'key_expired',
+    'project_unavailable',
+    'organisation_unavailable',
+    'model_not_allowed',
+    'byok_required',
+    'project_host_mismatch',
+    'model_not_found',
+    'route_not_found',
+    'method_not_allowed',
+    'capability_unsupported',
+    'body_too_large',
+    'rate_limited',
+    'insufficient_credit',
+    'hard_limit_reached',
+    'entitlement_missing',
+    'idempotency_conflict',
+    'upstream_unavailable',
+    'upstream_error',
+    'deadline_exceeded',
+    'service_unavailable',
+    'internal',
+    'invalid_token',
+    'permission_denied',
+    'not_found',
+    'conflict',
+    'network_error',
+    'aborted',
+]
+# Every type: the engine's five and the SDK's own `client_error`
+ErrorType = Literal[
+    'invalid_request_error', 'authentication_error', 'permission_error', 'rate_limit_error', 'api_error', 'client_error'
+]
 
 ENGINE_ERROR_CODES: Final = (
     'invalid_request',
@@ -81,8 +120,8 @@ RETRYABLE: Final = frozenset(
 
 @dataclass(frozen=True)
 class MeridianError:
-    code: str
-    type: str
+    code: ErrorCode
+    type: ErrorType
     status: int
     message: str
     retryable: bool
@@ -117,16 +156,26 @@ class Err:
 Result = Union[Ok[T], Err]  # noqa: UP007  (a runtime alias: `X | Y` on a generic is 3.10-fragile with TypeVars)
 
 
-_REQUEST_ID = re.compile(r'[ -~]{1,255}')
+_REQUEST_ID = re.compile(r'[!-~](?:[ -~]{0,253}[!-~])?')
 
 
 def valid_request_id(value: object) -> str | None:
-    """A request id fit for a header and a body: 1-255 printable ASCII characters (spaces allowed, never a line
-    break). Anything else is None."""
+    """A request id fit for a header and a body: 1-255 printable ASCII characters, never a line break, and never a
+    space first or last (a server strips those from a header, which would change the id). Anything else is None."""
     return value if isinstance(value, str) and _REQUEST_ID.fullmatch(value) else None
 
 
-def client_error(code: str, message: str, status: int = 0, request_id: str | None = None) -> MeridianError:
+def is_object(value: object) -> TypeGuard[dict[str, Any]]:
+    """A decoded JSON object (its keys are strings)."""
+    return isinstance(value, dict)
+
+
+def client_error(
+    code: Literal['network_error', 'aborted'],
+    message: str,
+    status: int = 0,
+    request_id: str | None = None,
+) -> MeridianError:
     """`network_error` or `aborted`: a failure on the SDK's side of the wire."""
     return MeridianError(code, 'client_error', status, message, code == 'network_error', request_id)
 
@@ -144,12 +193,21 @@ def _no_constant(name: str) -> Any:
     raise ValueError(f'{name} is not JSON')
 
 
+def _finite(text: str) -> float:
+    value = float(text)
+    if not math.isfinite(value):
+        raise ValueError('a number too large for a float')
+    return value
+
+
 def load_json(text: str, **hooks: Any) -> Any:
     """The decoded JSON, or NOT_JSON when the text is not JSON or nests deeper than the parser allows
-    (RecursionError). Strict, as Go and JavaScript are: `NaN`, `Infinity` and `-Infinity` are not JSON. `hooks` go to
-    `json.loads` (parse_int, parse_float)."""
+    (RecursionError). Strict, as Go and JavaScript are: `NaN`, `Infinity` and `-Infinity` are not JSON, and a number
+    too large for a float (`1e999`) is refused as Go refuses it, never read as infinity. `hooks` go to `json.loads`
+    (parse_int, parse_float, which then replaces the finite check)."""
+    options: dict[str, Any] = {'parse_float': _finite, **hooks}
     try:
-        return json.loads(text, parse_constant=_no_constant, **hooks)
+        return json.loads(text, parse_constant=_no_constant, **options)
     except (ValueError, RecursionError):
         return NOT_JSON
 
@@ -208,20 +266,24 @@ def parse_envelope(text: str) -> dict[str, Any] | None:
     return envelope_of(error_member(load_json(text)))
 
 
+def _engine_type(value: object) -> TypeGuard[ErrorType]:
+    return isinstance(value, str) and value in ENGINE_ERROR_TYPES
+
+
 def error_from_envelope(error: Mapping[str, Any], status: int | None = None) -> MeridianError:
     # [1] A code this SDK does not know (a newer engine) is reported as internal, and its raw code kept in the message
     raw = error['code']
     known = raw in STATUS_BY_CODE
     code = raw if known else 'internal'
     message = error['message'] if known else f'{error["message"]} (engine code: {raw})'
-    kind: str = error.get('type', 'api_error')
+    kind: object = error.get('type')
 
     # [2] Status from the response, or from the code when it arrived in a stream frame
     resolved = status if status is not None else STATUS_BY_CODE.get(code, 0)
     retryable = code in RETRYABLE and error.get('retryable') is not False
     return MeridianError(
         code,
-        kind if kind in ENGINE_ERROR_TYPES else 'api_error',
+        kind if _engine_type(kind) else 'api_error',
         resolved,
         message,
         retryable,

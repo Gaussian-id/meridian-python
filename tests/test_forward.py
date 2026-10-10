@@ -2,9 +2,10 @@ import asyncio
 import gzip
 import inspect
 import json
+import numbers
 import re
 import threading
-from collections.abc import AsyncIterator, Callable, Coroutine, Iterator
+from collections.abc import AsyncIterator, Callable, Coroutine, Hashable, Iterator
 from typing import Any, cast
 
 import anyio
@@ -12,6 +13,7 @@ import httpx
 import pytest
 
 from meridian import AsyncMeridian, Meridian
+from meridian._client import async_shared_client, shared_client
 from meridian.forward import (
     APP_CREDENTIAL_CODES,
     MAX_BODY_BYTES,
@@ -25,6 +27,7 @@ from meridian.forward import (
 )
 from tests.support.fake_engine import Scripted, chunk, completion, engine_error, envelope, frame
 from tests.support.modes import resolve
+from tests.support.recorder import Recorder
 
 pytestmark = [pytest.mark.anyio, pytest.mark.fake_only]
 MSG: list[Any] = [{'role': 'user', 'content': 'hi'}]
@@ -1376,32 +1379,33 @@ async def test_an_async_reply_body_narrows_without_casts(engine: Any) -> None:
 # --- The default client: one shared client per settings (and per event loop) --------------------------------------
 
 
-class Recorder:
-    """Stands in for the network under the default client: records which httpx transport sent each request."""
-
-    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        self.transports: list[object] = []  # held, so no id is reused while the test runs
-        answer = json.dumps(completion('shared')).encode()
-
-        def handle(transport: object, request: httpx.Request) -> httpx.Response:
-            self.transports.append(transport)
-            return httpx.Response(200, headers={'content-type': 'application/json'}, content=answer)
-
-        async def ahandle(transport: object, request: httpx.Request) -> httpx.Response:
-            return handle(transport, request)
-
-        monkeypatch.setattr(httpx.HTTPTransport, 'handle_request', handle)
-        monkeypatch.setattr(httpx.AsyncHTTPTransport, 'handle_async_request', ahandle)
-
-    @property
-    def senders(self) -> list[int]:
-        return [id(transport) for transport in self.transports]
-
-
 def default_forwarder(mode: str) -> Fwd:
     if mode == 'sync':
         return Forwarder[Any](authorize=allow_all)
     return AsyncForwarder[Any](authorize=allow_all)
+
+
+async def test_a_closed_shared_client_is_replaced_so_the_route_keeps_answering(
+    mode: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # `with shared_client() as client:` closes the one client every default route uses: the next use builds a new one
+    recorder = Recorder(monkeypatch)
+    monkeypatch.setenv('MERIDIAN_URL', f'http://closed-{mode}.engine.test')
+    monkeypatch.setenv('MERIDIAN_KEY', 'gmr_' + '7' * 64)
+    fwd = default_forwarder(mode)
+    assert (await send(fwd, {'messages': MSG})).status == 200
+    if mode == 'sync':
+        with shared_client() as old:
+            pass
+    else:
+        async with async_shared_client() as aold:
+            pass
+        old = aold
+    assert old.is_closed
+    assert (await send(fwd, {'messages': MSG})).status == 200
+    new = shared_client() if mode == 'sync' else async_shared_client()
+    assert new is not old and not new.is_closed
+    assert len(recorder.senders) == 2
 
 
 async def test_without_a_client_the_forwarder_shares_one_built_from_the_environment(
@@ -1527,14 +1531,60 @@ async def test_aclose_while_a_read_is_waiting_never_raises_and_closes_upstream(e
 
     async with anyio.create_task_group() as group:
         group.start_soon(reader)
-        while engine.parts_read() < 1:
-            await anyio.sleep(0.01)
-        await anyio.sleep(0.05)  # the reader now waits for a second piece inside the running relay
+        await engine.hanging.wait()  # the reader now waits for a second piece inside the running relay
+        assert engine.parts_read() == 1
         await body.aclose()  # used to raise: "aclose(): asynchronous generator is already running"
         assert engine.upstream_closed()
         await body.aclose()
         group.cancel_scope.cancel()  # the fake never ends a hung read by itself
     assert seen == [frame(chunk('a')).encode()]
+
+
+class _SlowClose(httpx.AsyncByteStream):
+    """An engine stream that sends one frame and then waits; closing it takes a checkpoint (`forever`: it never ends),
+    as closing a connection does."""
+
+    def __init__(self, forever: bool = False) -> None:
+        self.forever, self.closed = forever, False
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        yield frame(chunk('a')).encode()
+        await anyio.sleep_forever()
+
+    async def aclose(self) -> None:
+        await (anyio.sleep_forever() if self.forever else anyio.sleep(0))
+        self.closed = True
+
+
+async def slow_stream_body(engine: Any, held: _SlowClose) -> AsyncReplyBody:
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(200, headers={'content-type': 'text/event-stream'}, stream=held)
+    )
+    client = AsyncMeridian(engine.public_url, engine.project_key, transport=transport)
+    reply = await send(AsyncForwarder[Any](client=client, authorize=allow_all), {'messages': MSG, 'stream': True})
+    return cast('AsyncReplyBody', reply.body)
+
+
+async def test_a_relay_closed_inside_a_cancelled_scope_still_closes_upstream(engine: Any) -> None:
+    # anyio cancellation is level-triggered: every checkpoint inside a cancelled scope raises again, so an unshielded
+    # close would stop at its first checkpoint and leave the engine's stream open
+    held = _SlowClose()
+    body = await slow_stream_body(engine, held)
+    with anyio.CancelScope() as scope:
+        assert await body.__anext__() == frame(chunk('a')).encode()
+        scope.cancel()
+        await body.aclose()
+    assert held.closed
+
+
+async def test_the_relays_close_is_bounded(engine: Any) -> None:
+    held = _SlowClose(forever=True)
+    body = await slow_stream_body(engine, held)
+    assert await body.__anext__() == frame(chunk('a')).encode()
+    started = anyio.current_time()
+    with anyio.fail_after(8):  # an unbounded close fails here instead of hanging the suite
+        await body.aclose()
+    assert anyio.current_time() - started < 8 and not held.closed  # given up after 5 s
 
 
 class _BlockingStream(httpx.SyncByteStream):
@@ -1642,7 +1692,17 @@ BAD_IDS = [
     pytest.param('a\nb', id='lf'),
     pytest.param('x' * 256, id='too-long'),
     pytest.param('café', id='non-ascii'),
+    # A header value cannot start or end with a space (a server strips it, so the id would change on the way)
+    pytest.param('   ', id='spaces-only'),
+    pytest.param(' a', id='leading-space'),
+    pytest.param('a ', id='trailing-space'),
 ]
+
+
+async def test_a_request_id_with_inner_spaces_is_kept(mode: str, engine: Any) -> None:
+    engine.next(Scripted(status=429, headers={'x-request-id': 'req a b'}, json=envelope('rate_limited', 'req a b')))
+    reply = await send(build(mode, engine), {'messages': MSG})
+    assert reply.headers['x-request-id'] == 'req a b' and payload(reply)['error']['request_id'] == 'req a b'
 
 
 def wire_id(request_id: str) -> str:
@@ -1733,6 +1793,16 @@ async def test_a_200_with_an_error_and_only_bad_ids_has_no_id_at_all(mode: str, 
         pytest.param(Reply[Any](200), id='instance'),
         pytest.param((Reply, 'AppResponse'), id='tuple-with-string'),
         pytest.param([Reply], id='list'),
+        # A class that takes a verdict that is no response (True, False, 0, 1, None) for the app's own response
+        pytest.param(type(None), id='none-type'),
+        pytest.param(numbers.Number, id='number-abc'),
+        pytest.param(Hashable, id='hashable-abc'),
+        pytest.param((AppResponse, numbers.Integral), id='tuple-with-integral'),
+        pytest.param(float | int, id='union-type'),
+        # A generic alias is no class on any Python (3.10 still calls list[int] a type)
+        pytest.param(list[int], id='generic-alias'),
+        pytest.param((AppResponse, dict[str, Any]), id='tuple-with-generic-alias'),
+        pytest.param(Reply[Any], id='parametrised-reply'),
     ],
 )
 def test_a_response_type_that_is_not_a_class_or_a_tuple_of_proper_classes_raises_at_construction(

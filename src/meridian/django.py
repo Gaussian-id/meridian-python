@@ -6,9 +6,10 @@ event loop for the async one), never one per request.
 
 `forward_view` is for WSGI and `async_forward_view` for ASGI. Under ASGI, Django would buffer the whole stream of the
 sync view before sending any of it; under WSGI, it would run the async view in a throwaway event loop and buffer the
-whole stream too, so the async view refuses to run there. The sync view works from Django 4.2. The async view needs
-Django 5.0 or later to notice a browser that leaves mid-stream: Django 4.2's ASGI handler does not listen for
-`http.disconnect`, so there the engine's stream may be read to its end (and only then closed) after the browser left.
+whole stream too, so the async view refuses to run there (the generic 503). The sync view works from Django 4.2. The
+async view needs Django 5.0 or later to notice a browser that leaves mid-stream: Django 4.2's ASGI handler does not
+listen for `http.disconnect`, so there the engine's stream may be read to its end (and only then closed) after the
+browser left.
 
 The request body is read in chunks through the core's 8 MiB cap (413 past it). Under ASGI, Django's handler has
 already spooled the whole body to a temporary file before any view runs, so the cap bounds the memory the view uses,
@@ -40,7 +41,7 @@ except ImportError as missing:
     raise ImportError('meridian.django needs Django: install it with `pip install "meridian[django]"`.') from missing
 
 from ._client import AsyncMeridian, Meridian, async_shared_client, shared_client
-from .forward import AllowRule, AsyncForwarder, AsyncReplyBody, Forwarder, Reply, ReplyBody
+from .forward import GENERIC_MESSAGE, AllowRule, AsyncForwarder, AsyncReplyBody, Forwarder, Reply, ReplyBody
 
 __all__ = ['async_forward_view', 'async_meridian_client', 'forward_view', 'meridian_client']
 
@@ -270,8 +271,10 @@ def _async_response(reply: Reply[AsyncReplyBody]) -> HttpResponseBase:
 
 
 def _needs_asgi() -> HttpResponseBase:
-    message = 'async_forward_view needs an ASGI server; under WSGI, use forward_view.'
-    return JsonResponse({'error': {'message': message, 'type': 'api_error', 'code': 'internal'}}, status=500)
+    # A deployment mistake is the app's own, like any configuration error: the browser gets the generic 503 and learns
+    # nothing about the deployment
+    error = {'message': GENERIC_MESSAGE, 'type': 'api_error', 'code': 'service_unavailable', 'retryable': False}
+    return JsonResponse({'error': error}, status=503)
 
 
 # --- The views --------------------------------------------------------------------------------------------------------
@@ -318,10 +321,11 @@ def async_forward_view(
     client: AsyncMeridian | Callable[[], AsyncMeridian] | None = None,
     csrf_exempt: bool = True,
 ) -> Callable[[HttpRequest], Awaitable[HttpResponseBase]]:
-    """`forward_view` as an async view, for ASGI only (under WSGI it answers a 500 that says so, and never calls the
-    engine). `authorize` may be async; a sync one runs on the event loop, so it must not touch the database (use
-    `await request.auser()` in an async one). `client` is an AsyncMeridian, or a plain (not async) function returning
-    the same long-lived one every time; by default the shared client for `settings.MERIDIAN` on the running loop.
+    """`forward_view` as an async view, for ASGI only (under WSGI it answers the generic 503, as any configuration error
+    does, and never calls the engine). `authorize` may be async; a sync one runs on the event loop, so it must not
+    touch the database (use `await request.auser()` in an async one). `client` is an AsyncMeridian, or a plain (not
+    async) function returning the same long-lived one every time; by default the shared client for `settings.MERIDIAN`
+    on the running loop.
 
     Django's ASGI handler reads the whole request body into a temporary file before any view runs; the view then reads
     it in chunks through the core's 8 MiB cap (set a body limit in the server or proxy too). Noticing a browser that

@@ -37,6 +37,7 @@ from meridian.forward import AsyncReplyBody, ReplyBody
 from tests import django_settings
 from tests.support.adapter_contract import CHAT, CHECKS, MEBIBYTE, MESSAGES, STREAM, Wire, allow
 from tests.support.fake_engine import Scripted, chunk, frame
+from tests.support.recorder import Recorder
 
 
 def untyped(value: object) -> Any:
@@ -478,11 +479,19 @@ async def test_the_views_read_the_body_in_chunks(engine: Any, kind: str) -> None
     assert got <= 8 * MEBIBYTE + 65536
 
 
-def test_the_async_view_under_wsgi_is_refused_not_buffered(engine: Any) -> None:
+def test_the_async_view_under_wsgi_is_the_generic_503_never_buffered(engine: Any) -> None:
+    # A deployment mistake is the app's own: the browser learns nothing about it, as for any configuration error
     engine.next(Scripted(chunks=[frame(chunk('a')), frame('[DONE]')]))
     served = wsgi(async_forward_view(authorize=allow, client=async_client(engine)), body=STREAM)
-    error = json.loads(served.body)['error']
-    assert served.status == 500 and 'ASGI' in error['message'] and 'forward_view' in error['message']
+    assert served.status == 503
+    assert json.loads(served.body) == {
+        'error': {
+            'message': 'The service is temporarily unavailable.',
+            'type': 'api_error',
+            'code': 'service_unavailable',
+            'retryable': False,
+        }
+    }
     assert engine.requests == []
 
 
@@ -578,6 +587,29 @@ async def test_the_async_settings_client_is_shared_on_the_loop(engine: Any) -> N
         client = async_meridian_client()
         assert client is async_meridian_client()
         assert client is async_shared_client(engine.public_url, engine.project_key)
+
+
+CLOSING = {'URL': 'http://django-closed.engine.test', 'KEY': 'gmr_' + '8' * 64}
+
+
+def test_a_closed_settings_client_is_replaced_so_the_view_keeps_answering(monkeypatch: pytest.MonkeyPatch) -> None:
+    recorder = Recorder(monkeypatch)
+    with override_settings(MERIDIAN=CLOSING):
+        with meridian_client() as client:
+            assert client.chat.create({'messages': cast('Any', MESSAGES)}).error is None
+        served = wsgi(forward_view(authorize=allow))
+    assert served.status == 200 and len(recorder.senders) == 2
+
+
+async def test_a_closed_async_settings_client_is_replaced_so_the_view_keeps_answering(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recorder = Recorder(monkeypatch)
+    with override_settings(MERIDIAN=CLOSING):
+        async with async_meridian_client() as client:
+            assert (await client.chat.create({'messages': cast('Any', MESSAGES)})).error is None
+        served = await asgi(async_forward_view(authorize=allow))
+    assert served.status == 200 and len(recorder.senders) == 2
 
 
 @pytest.mark.parametrize('conf', [{}, 'not a mapping', {'URL': 5}])

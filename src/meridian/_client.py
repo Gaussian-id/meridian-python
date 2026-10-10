@@ -37,6 +37,11 @@ class Meridian:
         self.chat = ChatApi(self._transport)
         self.models = ModelsApi(self._transport)
 
+    @property
+    def is_closed(self) -> bool:
+        """True once `close()` ran: every call then answers `invalid_request` ("The client is closed.")."""
+        return self._transport.is_closed
+
     def close(self) -> None:
         self._transport.close()
 
@@ -73,6 +78,11 @@ class AsyncMeridian:
         self.chat = AsyncChatApi(self._transport)
         self.models = AsyncModelsApi(self._transport)
 
+    @property
+    def is_closed(self) -> bool:
+        """True once `aclose()` ran: every call then answers `invalid_request` ("The client is closed.")."""
+        return self._transport.is_closed
+
     async def aclose(self) -> None:
         await self._transport.aclose()
 
@@ -86,7 +96,8 @@ class AsyncMeridian:
 # --- The shared default clients -------------------------------------------------------------------------------------
 # One long-lived client per (url, key), built on first use, for code that is given no client of its own (the
 # forwarding route's default). Only usable settings are kept: a client refused for a missing or bad setting is made
-# afresh each time, so an environment fixed after start-up is picked up and a bad one never sticks.
+# afresh each time, so an environment fixed after start-up is picked up and a bad one never sticks. A kept client that
+# has been closed (`with shared_client() as client:` closes it) is replaced on the next use, never handed out again.
 
 _lock = threading.Lock()
 _shared: dict[tuple[str, str], Meridian] = {}
@@ -105,10 +116,10 @@ def shared_client(url: str | None = None, key: str | None = None) -> Meridian:
     if refusal(base, token, None, None, PUBLIC, SYNC_IO) is not None:
         return Meridian(base, token)
 
-    # [2] Otherwise the one client for them, built once
+    # [2] Otherwise the one client for them, built once (again, if the last one was closed)
     with _lock:
         client = _shared.get((base, token))
-        if client is None:
+        if client is None or client.is_closed:
             client = _shared[base, token] = Meridian(base, token)
         return client
 
@@ -129,12 +140,13 @@ def async_shared_client(url: str | None = None, key: str | None = None) -> Async
     except RuntimeError:
         return AsyncMeridian(base, token)
 
-    # [2] Otherwise the one client for them on this loop, built once; the entries of closed loops are dropped first
+    # [2] Otherwise the one client for them on this loop, built once (again, if the last one was closed); the entries
+    #     of closed loops are dropped first
     with _lock:
         for old in [known for known in _async_shared if known.is_closed()]:
             del _async_shared[old]
         clients = _async_shared.setdefault(loop, {})
         client = clients.get((base, token))
-        if client is None:
+        if client is None or client.is_closed:
             client = clients[base, token] = AsyncMeridian(base, token)
         return client

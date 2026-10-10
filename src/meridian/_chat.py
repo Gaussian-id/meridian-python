@@ -12,7 +12,7 @@ if TYPE_CHECKING:
 
 T = TypeVar('T')
 CHAT_PATH = '/v1/chat/completions'
-MODELS_CALL = Call('GET', '/v1/models')
+MODELS_CALL = Call('GET', '/v1/models', object_body=True)
 
 
 class JsonTransport(Protocol):

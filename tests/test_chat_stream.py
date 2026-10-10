@@ -110,6 +110,20 @@ async def test_a_leading_byte_order_mark_is_ignored(mode: str, engine: Any) -> N
     assert await collect(s) == ['a'] and s.error is None
 
 
+async def test_a_bare_data_line_is_an_empty_data_field(mode: str, engine: Any) -> None:
+    # SSE: a line with no colon is a field name with an empty value, so `data` alone is data '' (as the forwarding
+    # guard reads it): an event of nothing is no chat chunk, and ends the stream closed
+    s = await open_stream(mode, engine, frame(chunk('a')), b'data\n\n', frame(chunk('late')), frame('[DONE]'))
+    assert await collect(s) == ['a']
+    assert s.error.code == 'network_error'
+
+
+async def test_a_bare_data_line_inside_an_event_is_an_empty_line_of_its_data(mode: str, engine: Any) -> None:
+    head, tail = json.dumps(chunk('ok')).split(', "choices"')
+    s = await open_stream(mode, engine, f'data: {head},\ndata\ndata: "choices"{tail}\n\n', frame('[DONE]'))
+    assert await collect(s) == ['ok'] and s.error is None
+
+
 async def test_a_large_event_under_the_cap_arrives_whole(mode: str, engine: Any) -> None:
     big = 'y' * (1 << 20)
     wire = (frame(chunk(big)) + frame('[DONE]')).encode()
@@ -238,13 +252,57 @@ async def test_a_frame_nested_too_deep_to_parse_is_a_network_error(mode: str, en
     assert engine.upstream_closed()
 
 
+ALREADY_READ = ('aborted', 'client_error', 'The stream was already read.')
+
+
+def verdict(error: Any) -> tuple[str, str, str]:
+    return (error.code, error.type, error.message)
+
+
+async def bytes_of(mode: str, stream: Any) -> bytes:
+    return b''.join(stream.iter_bytes()) if mode == 'sync' else b''.join([b async for b in stream.aiter_bytes()])
+
+
 async def test_a_stream_reads_once(mode: str, engine: Any) -> None:
+    # A second read is an error, never a silent empty success (story 20; meridian-js and meridian-go do the same)
     s = await open_stream(mode, engine, frame(chunk('a')), frame('[DONE]'))
-    assert await collect(s) == ['a']
-    assert await collect(s) == [] and s.error is None  # a finished stream keeps its result
+    assert await collect(s) == ['a'] and s.error is None
+    assert await collect(s) == []
+    assert verdict(s.error) == ALREADY_READ
     s2 = await open_stream(mode, engine, frame(chunk('a')), frame('[DONE]'))
     await resolve(s2.cancel())
     assert (await collect(s2)) == [] and s2.error.code == 'aborted'
+
+
+@pytest.mark.parametrize('first', ['iterate', 'text', 'bytes'])
+@pytest.mark.parametrize('second', ['iterate', 'text', 'bytes'])
+async def test_any_second_read_of_a_finished_stream_records_already_read(
+    mode: str, engine: Any, first: str, second: str
+) -> None:
+    s = await open_stream(mode, engine, frame(chunk('a')), frame('[DONE]'))
+
+    async def read(how: str) -> Any:
+        if how == 'iterate':
+            return await collect(s)
+        if how == 'text':
+            return await resolve(s.text())
+        return await bytes_of(mode, s)
+
+    await read(first)
+    assert s.error is None
+    again = await read(second)
+    assert verdict(s.error) == ALREADY_READ
+    if second == 'text':
+        assert again.data is None and verdict(again.error) == ALREADY_READ  # never Ok('')
+    if second == 'bytes':
+        assert b'The stream was already read.' in again
+
+
+async def test_a_second_read_keeps_the_verdict_of_a_stream_that_failed(mode: str, engine: Any) -> None:
+    s = await open_stream(mode, engine, frame(chunk('a')))  # ends without [DONE]
+    first = await resolve(s.text())
+    second = await resolve(s.text())
+    assert first.error.code == second.error.code == 'network_error'
 
 
 async def test_cancel_mid_stream_ends_as_aborted(mode: str, engine: Any) -> None:
@@ -335,8 +393,9 @@ async def test_a_compressed_response_still_parses(mode: str, engine: Any) -> Non
 
 async def test_a_fully_forwarded_stream_is_finished(mode: str, engine: Any) -> None:
     s = await open_stream(mode, engine, frame(chunk('a')), frame('[DONE]'))
-    _ = b''.join(s.iter_bytes()) if mode == 'sync' else b''.join([b async for b in s.aiter_bytes()])
-    assert await collect(s) == [] and s.error is None  # the finished result, not "already read"
+    _ = await bytes_of(mode, s)
+    assert s.error is None  # finished: nothing went wrong
+    assert await collect(s) == [] and verdict(s.error) == ALREADY_READ  # reading it again is the mistake
 
 
 async def test_cancel_during_iter_bytes_stops_and_records_aborted(mode: str, engine: Any) -> None:

@@ -25,7 +25,10 @@ from collections.abc import (
 )
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
+from types import GenericAlias
 from typing import TYPE_CHECKING, Any, Generic, Literal, Protocol, TypeVar, cast, runtime_checkable
+
+import anyio  # httpx's own dependency (its async I/O), so no dependency of the SDK's own; works under asyncio and trio
 
 from ._client import AsyncMeridian, Meridian, async_shared_client, shared_client
 from ._errors import (
@@ -71,6 +74,9 @@ MAX_BODY_DEPTH = 64
 
 # One streamed event may be this many bytes before the stream is failed closed (the parser's own cap, in bytes)
 MAX_EVENT_BYTES = 16 * 1024 * 1024
+
+# How long closing the engine's stream may take once the relay ends (the adapters use the same bound)
+CLOSE_WITHIN = 5
 
 # The app's own key, account or credit (owner, 10 Oct): never described to the browser
 APP_CREDENTIAL_CODES = frozenset(
@@ -369,13 +375,6 @@ async def _aread(read_body: Callable[[], object]) -> bytes | Reply[Any]:
         return _unreadable()
 
 
-def _finite(text: str) -> float:
-    value = float(text)
-    if not math.isfinite(value):
-        raise ValueError('a number too large for JSON')
-    return value
-
-
 def _names(value: object) -> tuple[str, ...]:
     """A bare string is one name, never its letters; anything but a collection of strings names nothing."""
     if isinstance(value, str):
@@ -433,10 +432,10 @@ def _too_deep(body: dict[str, Any]) -> bool:
 
 
 def _parse(raw: bytes) -> dict[str, Any] | Reply[Any]:
-    # [1] Strict UTF-8 JSON (no UTF-16 or UTF-32, no BOM; no NaN or Infinity, which would not re-encode as JSON). The
-    # bytes are already within MAX_BODY_BYTES (_read)
+    # [1] Strict UTF-8 JSON (no UTF-16 or UTF-32, no BOM; no NaN, Infinity or 1e999, which would not re-encode as
+    # JSON). The bytes are already within MAX_BODY_BYTES (_read)
     try:
-        body: Any = load_json(raw.decode('utf-8'), parse_float=_finite)
+        body: Any = load_json(raw.decode('utf-8'))
     except UnicodeDecodeError:
         body = NOT_JSON
     if body is NOT_JSON:
@@ -669,8 +668,10 @@ async def _arelay(stream: AsyncChatStream) -> AsyncGenerator[bytes, None]:
         if out:
             yield out
     finally:
-        # [3] Finished, failed, cancelled, or abandoned by the browser: upstream is closed
-        await upstream.aclose()
+        # [3] Finished, failed, cancelled, or abandoned by the browser: upstream is closed, shielded (a cancelled scope
+        #     would stop the close at its first checkpoint) and bounded (a close that hangs is given up)
+        with anyio.move_on_after(CLOSE_WITHIN, shield=True):
+            await upstream.aclose()
 
 
 class _Body:
@@ -768,15 +769,28 @@ def _require(authorize: object) -> None:
         )
 
 
+# Verdicts that are never a response: a response_type that takes any of them for one is refused
+_NOT_RESPONSES = (True, False, 0, 1, None)
+
+
+def _takes_a_verdict(kinds: tuple[type, ...]) -> bool:
+    try:
+        return any(isinstance(probe, kinds) for probe in _NOT_RESPONSES)
+    except Exception:  # a class whose instance check raises cannot be trusted to tell a response either
+        return True
+
+
 def _response_types(value: object) -> type | tuple[type, ...]:
-    """`response_type` as given, once checked: a class, or a non-empty tuple of classes, none of them `object`, `bool`
-    or `int` (each would take a verdict that is no response, such as `False` or `1`, for the app's own response).
+    """`response_type` as given, once checked: a class, or a non-empty tuple of classes (never a generic alias such as
+    `list[int]`, which 3.10 still calls a class), none of which takes a verdict that is no response (`True`, `False`,
+    `0`, `1`, `None`) for the app's own response: so never `object`, `bool`, `int`, `numbers.Number`, `Hashable`, ...
     Like a missing `authorize`, a bad one is a mistake in the app's set-up and raises `TypeError` at construction."""
     kinds = cast('tuple[object, ...]', value) if isinstance(value, tuple) else (value,)
-    if not kinds or not all(isinstance(kind, type) and kind not in (object, bool, int) for kind in kinds):
+    classes = tuple(kind for kind in kinds if isinstance(kind, type) and not isinstance(kind, GenericAlias))
+    if not kinds or len(classes) != len(kinds) or _takes_a_verdict(classes):
         raise TypeError(
-            'response_type must be a class, or a non-empty tuple of classes, other than object, bool and int: '
-            "it says what counts as the app's own response."
+            'response_type must be a class, or a non-empty tuple of classes, that no verdict such as True, False, 0, '
+            "1 or None is an instance of (so not object, bool or int): it says what counts as the app's own response."
         )
     return cast('type | tuple[type, ...]', value)
 

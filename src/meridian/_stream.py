@@ -18,11 +18,13 @@ from ._errors import (
     envelope_of,
     error_from_envelope,
     error_member,
+    is_object,
     load_json,
 )
 from ._sse import EventDecoder, EventTooLarge
 
 USAGE_KEYS = ('prompt_tokens', 'completion_tokens', 'total_tokens')
+ALREADY_READ = 'The stream was already read.'
 _STREAM_FAILURES = (httpx.HTTPError, httpx.StreamError)
 
 
@@ -78,10 +80,10 @@ class _State:
             return 'done'
 
         # [3] Anything else must be a chat chunk
-        if not isinstance(raw, dict) or not isinstance(raw.get('choices'), list):  # pyright: ignore[reportUnknownMemberType]
+        if not is_object(raw) or not isinstance(raw.get('choices'), list):
             self.error = self.failure('network_error', 'The stream sent a frame that is not a chat chunk.')
             return 'done'
-        chunk: dict[str, Any] = raw  # pyright: ignore[reportUnknownVariableType]
+        chunk = raw
 
         # [4] The usage chunk has no choices; a text chunk carries its delta
         choices: list[Any] = chunk['choices']
@@ -94,7 +96,7 @@ class _State:
         content: Any = cast('dict[str, Any]', delta).get('content') if isinstance(delta, dict) else None
         return ChatChunk(content if isinstance(content, str) else '', chunk)
 
-    def failure(self, code: str, message: str) -> MeridianError:
+    def failure(self, code: Literal['network_error', 'aborted'], message: str) -> MeridianError:
         """A failure on the SDK's side of this stream, carrying the response's request id."""
         return client_error(code, message, request_id=self.request_id)
 
@@ -117,10 +119,10 @@ class _State:
             self.error = self.failure('network_error', 'The stream connection failed.')
 
     def begin(self) -> bool:
-        """True when this read may proceed; a second read of an unfinished stream is recorded as aborted."""
+        """True when this read may proceed. A stream is read once: any later read (after a read, finished or not, or a
+        cancel) is a mistake, recorded as `aborted` unless the stream already ended with an error of its own."""
         if self.consumed:
-            if not self.finished:
-                self.abort('This stream was already read.')
+            self.abort(ALREADY_READ)
             return False
         self.consumed = True
         return True
@@ -142,12 +144,14 @@ class _State:
 
 
 def _already_read_frame() -> bytes:
-    body = {'error': {'message': 'This stream was already read.', 'type': 'api_error', 'code': 'internal'}}
+    body = {'error': {'message': ALREADY_READ, 'type': 'api_error', 'code': 'internal'}}
     return f'data: {json.dumps(body)}\n\n'.encode()
 
 
 class ChatStream:
-    """One streamed reply, read once with `for`."""
+    """One streamed reply, read once: with `for`, `text()` or `iter_bytes()`. Any later read gives nothing (`text()`
+    an `Err`) and sets `.error` to `aborted` ("The stream was already read."), unless the stream had already ended with
+    an error of its own."""
 
     def __init__(self, response: httpx.Response) -> None:
         self._response = response
@@ -215,13 +219,13 @@ class ChatStream:
         return self._state.result(''.join(c.delta for c in self))
 
     def iter_bytes(self) -> Generator[bytes, None, None]:
-        """The engine's events byte for byte (content-decoding undone), once: for forwarding to a browser."""
+        """The engine's events byte for byte (content-decoding undone), once: for forwarding to a browser. A second
+        read records `aborted` and gives one error frame saying so."""
         # [1] A stream is read once
         state = self._state
-        if state.consumed:
+        if not state.begin():
             yield _already_read_frame()
             return
-        state.consumed = True
         ended = False
         try:
             # [2] Hand every piece over, stopping at once if the caller cancels meanwhile
@@ -241,7 +245,11 @@ class ChatStream:
 
 
 class AsyncChatStream:
-    """One streamed reply, read once with `async for`."""
+    """One streamed reply, read once (`async for`, `text()` or `aiter_bytes()`), as ChatStream is.
+
+    `.error` is final only once the iteration is closed: a loop left with `break` is closed by the event loop later,
+    so close it yourself (`await stream.cancel()`, or iterate inside `contextlib.aclosing(stream.__aiter__())`) before
+    reading `.error`."""
 
     def __init__(self, response: httpx.Response) -> None:
         self._response = response
@@ -315,13 +323,13 @@ class AsyncChatStream:
         return self._state.result(''.join([c.delta async for c in self]))
 
     async def aiter_bytes(self) -> AsyncGenerator[bytes, None]:
-        """The engine's events byte for byte (content-decoding undone), once: for forwarding to a browser."""
+        """The engine's events byte for byte (content-decoding undone), once: for forwarding to a browser. A second
+        read records `aborted` and gives one error frame saying so."""
         # [1] A stream is read once
         state = self._state
-        if state.consumed:
+        if not state.begin():
             yield _already_read_frame()
             return
-        state.consumed = True
         ended = False
         try:
             # [2] Hand every piece over, stopping at once if the caller cancels meanwhile
