@@ -1,2 +1,5 @@
 * text=auto eol=lf
 *.json text eol=lf
+
+# Brand artwork is kept byte for byte (no line-ending normalisation)
+assets/brand/*.svg -text
