@@ -17,7 +17,7 @@ PRICED_KEY = re.compile(
 
 
 def test_spec_source_records_the_engine_commit() -> None:
-    from meridian._version import ENGINE_API_VERSION, ENGINE_SPEC_COMMIT
+    from gauss_meridian._version import ENGINE_API_VERSION, ENGINE_SPEC_COMMIT
 
     source = json.loads((ROOT / 'spec' / 'SOURCE.json').read_text(encoding='utf-8'))
     assert re.fullmatch(r'[0-9a-f]{12}', source['engineCommit'])
@@ -40,7 +40,7 @@ def _walk(annotation: object, seen: set[int], keys: list[str], classes: list[str
 
 
 def test_generated_admin_types_carry_no_price_or_cost_field() -> None:
-    from meridian._generated import admin
+    from gauss_meridian._generated import admin
 
     seen: set[int] = set()
     keys: list[str] = []
@@ -50,12 +50,12 @@ def test_generated_admin_types_carry_no_price_or_cost_field() -> None:
     assert keys and classes, 'the generated admin module has no TypedDicts'
     assert [k for k in keys if PRICED_KEY.search(k)] == []
     assert [c for c in classes if re.search('price|cost', c, re.IGNORECASE)] == []
-    text = (ROOT / 'src' / 'meridian' / '_generated' / 'admin.py').read_text(encoding='utf-8')
+    text = (ROOT / 'src' / 'gauss_meridian' / '_generated' / 'admin.py').read_text(encoding='utf-8')
     assert not re.search('per_million|SupplierPrice', text, re.IGNORECASE)
 
 
 def test_generated_admin_types_come_only_from_the_wrapped_operations() -> None:
-    from meridian._generated import admin
+    from gauss_meridian._generated import admin
 
     wrapped = list(wrapped_operations().values())
     assert len(wrapped) == 21
@@ -82,11 +82,11 @@ from typing import TYPE_CHECKING
 
 from typing_extensions import assert_type
 
-from meridian import Result
-from meridian.admin import AsyncMeridianAdmin, IssuedKey, MeridianAdmin, Secret
+from gauss_meridian import Result
+from gauss_meridian.admin import AsyncMeridianAdmin, IssuedKey, MeridianAdmin, Secret
 
 if TYPE_CHECKING:
-    from meridian._generated.admin import (
+    from gauss_meridian._generated.admin import (
         CatalogueModelBody,
         CredentialMetadata,
         KeyBody,
@@ -167,7 +167,7 @@ from contextlib import aclosing
 
 from typing_extensions import assert_type
 
-from meridian import AsyncMeridian
+from gauss_meridian import AsyncMeridian
 
 
 async def read(client: AsyncMeridian) -> None:
@@ -204,8 +204,8 @@ def test_the_readmes_async_stream_example_type_checks_under_pyright_strict(tmp_p
 
 
 def test_the_issued_key_type_has_the_generated_keys_with_a_secret_api_key() -> None:
-    from meridian._generated import admin as generated
-    from meridian.admin import IssuedKey, Secret
+    from gauss_meridian._generated import admin as generated
+    from gauss_meridian.admin import IssuedKey, Secret
 
     assert sorted(get_type_hints(IssuedKey)) == sorted(get_type_hints(generated.IssuedKey))
     assert get_type_hints(IssuedKey)['api_key'] is Secret
@@ -220,7 +220,7 @@ def test_the_generated_types_match_the_pinned_documents() -> None:
 
 
 def test_generated_public_types_cover_the_chat_shapes() -> None:
-    from meridian._generated import public
+    from gauss_meridian._generated import public
 
     for name in ('ChatCompletionRequest', 'ChatCompletion', 'ChatCompletionChunk', 'ChatMessage', 'Usage', 'ModelList'):
         assert hasattr(public, name), name
@@ -235,8 +235,8 @@ def test_meridian_imports_without_typing_extensions() -> None:
         "            raise ImportError('typing_extensions is blocked')\n"
         'sys.meta_path.insert(0, Block())\n'
         "sys.modules.pop('typing_extensions', None)\n"
-        'import meridian, meridian.admin, meridian.forward\n'
-        "assert 'meridian._generated.public' not in sys.modules\n"
+        'import gauss_meridian, gauss_meridian.admin, gauss_meridian.forward\n'
+        "assert 'gauss_meridian._generated.public' not in sys.modules\n"
     )
     result = subprocess.run([sys.executable, '-c', code], capture_output=True, text=True, cwd=ROOT, check=False)
     assert result.returncode == 0, result.stderr
@@ -253,10 +253,11 @@ def test_meridian_types_imports_at_run_time_without_typing_extensions() -> None:
         'sys.meta_path.insert(0, Block())\n'
         "sys.modules.pop('typing_extensions', None)\n"
         'from typing import Any\n'
-        'from meridian.types import ChatCompletion, ChatCompletionChunk, ChatMessage, ChatParams, ModelList, Usage\n'
+        'from gauss_meridian.types import ('
+        'ChatCompletion, ChatCompletionChunk, ChatMessage, ChatParams, ModelList, Usage)\n'
         'for alias in (ChatCompletion, ChatCompletionChunk, ChatMessage, ChatParams, ModelList, Usage):\n'
         '    assert alias == dict[str, Any], alias\n'
-        "assert 'meridian._generated.public' not in sys.modules\n"
+        "assert 'gauss_meridian._generated.public' not in sys.modules\n"
     )
     result = subprocess.run([sys.executable, '-c', code], capture_output=True, text=True, cwd=ROOT, check=False)
     assert result.returncode == 0, result.stderr

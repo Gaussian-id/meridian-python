@@ -13,10 +13,10 @@ import httpx
 import pytest
 from fastapi import FastAPI
 
-from meridian import AsyncMeridian, Meridian
-from meridian.admin import AsyncMeridianAdmin, MeridianAdmin
-from meridian.fastapi import forward_route
-from meridian.forward import AllowRule, AsyncForwarder, AsyncReplyBody, Forwarder
+from gauss_meridian import AsyncMeridian, Meridian
+from gauss_meridian.admin import AsyncMeridianAdmin, MeridianAdmin
+from gauss_meridian.fastapi import forward_route
+from gauss_meridian.forward import AllowRule, AsyncForwarder, AsyncReplyBody, Forwarder
 from tests.support.engine import ContractEngine
 from tests.support.modes import make_client, resolve
 

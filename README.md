@@ -1,4 +1,4 @@
-# meridian (Python)
+# gauss-meridian (Python)
 
 The Meridian SDK for Python: chat, streaming, provisioning and a forwarding route for the Meridian engine, on httpx.
 
@@ -20,9 +20,14 @@ uv add ./meridian-python --extra django
 poetry add ./meridian-python --extras flask
 ```
 
-The extras pull in `fastapi>=0.110`, `django>=4.2` and `flask>=3.0`. `import meridian` (and `meridian.forward`,
-`meridian.admin`, `meridian.types`) never imports a framework; `import meridian.flask` without Flask installed raises an
-`ImportError` that names the extra to install (the same for `meridian.fastapi` and `meridian.django`).
+The distribution is named `gauss-meridian` (`pip install gauss-meridian`, `pip install "gauss-meridian[fastapi]"` once it
+is published) and it installs the import package `gauss_meridian`, so it does not clash with Google's `google-meridian`,
+which installs `meridian`.
+
+The extras pull in `fastapi>=0.110`, `django>=4.2` and `flask>=3.0`. `import gauss_meridian` (and
+`gauss_meridian.forward`, `gauss_meridian.admin`, `gauss_meridian.types`) never imports a framework;
+`import gauss_meridian.flask` without Flask installed raises an `ImportError` that names the extra to install (the same
+for `gauss_meridian.fastapi` and `gauss_meridian.django`).
 
 ## Three ways to connect
 
@@ -46,7 +51,7 @@ Every call returns a `Result`: an `Ok` (`.data` set, `.error` is `None`) or an `
 API, network and configuration failures never raise.
 
 ```python
-from meridian import Meridian
+from gauss_meridian import Meridian
 
 client = Meridian()  # MERIDIAN_URL and MERIDIAN_KEY from the environment; or Meridian(url, key)
 
@@ -61,7 +66,7 @@ else:
 The async client is the same API, awaited:
 
 ```python
-from meridian import AsyncMeridian
+from gauss_meridian import AsyncMeridian
 
 async with AsyncMeridian() as client:
     result = await client.chat.create({'messages': [{'role': 'user', 'content': 'Hello'}]})
@@ -69,7 +74,7 @@ async with AsyncMeridian() as client:
 
 `client.models.list()` lists the models. `if result.error is None:` narrows `result.data` under a type checker, and
 `result.request_id` on an `Ok` is the engine's request id. The SDK never fills in a model: without one the engine
-chooses (`meridian/auto`). Request and reply types are in `meridian.types` (`ChatParams`, `ChatCompletion`, ...).
+chooses (`meridian/auto`). Request and reply types are in `gauss_meridian.types` (`ChatParams`, `ChatCompletion`, ...).
 
 A client built with a missing or malformed URL or key (or with both `http_client` and `transport`) is still built; it
 answers every call with an `invalid_request` error of type `client_error` and sends nothing. So does a closed client
@@ -142,7 +147,7 @@ connection, records `aborted` and lets the `CancelledError` propagate.
 - `retry_after`: the response's `Retry-After` header as sent (delta-seconds or an HTTP date) when it was valid, else
   `None`. Wait at least that long before trying a `rate_limited` call again yourself.
 
-`code` and `type` are typed as `Literal` unions, exported as `meridian.ErrorCode` and `meridian.ErrorType`, so a type
+`code` and `type` are typed as `Literal` unions, exported as `gauss_meridian.ErrorCode` and `gauss_meridian.ErrorType`, so a type
 checker catches a misspelt code in `if result.error.code == 'rate_limited':`.
 
 ## Retries, timeouts and idempotency
@@ -198,7 +203,7 @@ The route is public and spends your credit, so it is the SDK's security boundary
   `client=` you pass must be a client, or a plain function returning the same long-lived client every time.
 
 ```python
-from meridian.forward import AllowRule
+from gauss_meridian.forward import AllowRule
 
 allow = AllowRule(model=['your-model-id'], max_tokens_cap=1024, options=['top_p'])
 ```
@@ -210,7 +215,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
-from meridian.fastapi import forward_route, meridian_client
+from gauss_meridian.fastapi import forward_route, meridian_client
 
 
 @asynccontextmanager
@@ -246,7 +251,7 @@ MERIDIAN = {'URL': os.environ['MERIDIAN_URL'], 'KEY': os.environ['MERIDIAN_KEY']
 # urls.py
 from django.http import JsonResponse
 from django.urls import path
-from meridian.django import async_forward_view, forward_view
+from gauss_meridian.django import async_forward_view, forward_view
 
 
 def authorize(request):
@@ -272,7 +277,7 @@ urlpatterns = [path('api/meridian/chat', forward_view(authorize=authorize))]
 import os
 
 from flask import Flask, jsonify, make_response, session
-from meridian.flask import forward_blueprint
+from gauss_meridian.flask import forward_blueprint
 
 app = Flask(__name__)
 app.config['MERIDIAN_URL'] = os.environ['MERIDIAN_URL']  # optional: the environment is used otherwise
@@ -295,7 +300,7 @@ app.register_blueprint(forward_blueprint(authorize=authorize))  # POST /api/meri
   blueprint is exempt by default (same reason as Django); pass `csrf_exempt=False` to keep the check.
 - `meridian_client()` (and `MeridianExtension(app).client()`) is the shared client for the app's config.
 
-Another framework can use `meridian.forward.Forwarder` / `AsyncForwarder` directly: give it the request's method,
+Another framework can use `gauss_meridian.forward.Forwarder` / `AsyncForwarder` directly: give it the request's method,
 content type, idempotency key and a chunked body reader, and close the streamed reply on every exit path.
 
 ## Admin: provisioning with an integrator key
@@ -304,7 +309,7 @@ content type, idempotency key and a chunked body reader, and close the streamed 
 (`MERIDIAN_ADMIN_URL`, `MERIDIAN_INTEGRATOR_KEY`). Server side only.
 
 ```python
-from meridian.admin import MeridianAdmin
+from gauss_meridian.admin import MeridianAdmin
 
 admin = MeridianAdmin()
 org = admin.orgs.create({'name': 'Acme', 'external_reference': 'acme-1'})

@@ -5,13 +5,13 @@ import anyio
 import httpx
 import pytest
 
-from meridian import AsyncMeridian, Meridian, Ok
+from gauss_meridian import AsyncMeridian, Meridian, Ok
 from tests.support.fake_engine import Scripted, completion, engine_error
 from tests.support.modes import make_client, resolve
 
 MSG: Any = [{'role': 'user', 'content': 'hi'}]
 if TYPE_CHECKING:
-    from meridian.types import ChatParams
+    from gauss_meridian.types import ChatParams
 
 pytestmark = pytest.mark.anyio
 

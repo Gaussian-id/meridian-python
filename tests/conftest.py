@@ -56,7 +56,7 @@ def clock(monkeypatch: pytest.MonkeyPatch) -> list[float]:
     async def asleep(seconds: float) -> None:
         waits.append(seconds)
 
-    import meridian._clock as clock_module
+    import gauss_meridian._clock as clock_module
 
     monkeypatch.setattr(clock_module, 'sleep', sleep)
     monkeypatch.setattr(clock_module, 'asleep', asleep)

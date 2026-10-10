@@ -1,4 +1,4 @@
-"""FastAPI glue: a client dependency and a ready forwarding endpoint. Install with `meridian[fastapi]`.
+"""FastAPI glue: a client dependency and a ready forwarding endpoint. Install with `gauss-meridian[fastapi]`.
 
 The shared client lives as long as the app: close it at shutdown in the app's lifespan, on the loop that used it
 (`await (await meridian_client()).aclose()`). Under trio there is no asyncio loop to share a client on, so the default
@@ -19,7 +19,9 @@ try:
     from starlette.background import BackgroundTask
     from starlette.types import Receive, Scope, Send
 except ImportError as missing:
-    raise ImportError('meridian.fastapi needs FastAPI: install it with `pip install "meridian[fastapi]"`.') from missing
+    raise ImportError(
+        'gauss_meridian.fastapi needs FastAPI: install it with `pip install "gauss-meridian[fastapi]"`.'
+    ) from missing
 
 from ._client import AsyncMeridian, async_shared_client
 from .forward import AllowRule, AsyncForwarder, AsyncReplyBody, Reply

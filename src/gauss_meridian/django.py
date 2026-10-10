@@ -1,4 +1,4 @@
-"""Django glue: clients from settings and ready forwarding views (WSGI and ASGI). Install with `meridian[django]`.
+"""Django glue: clients from settings and ready forwarding views (WSGI and ASGI). Install with `gauss-meridian[django]`.
 
 `settings.MERIDIAN = {'URL': ..., 'KEY': ...}` configures the clients; a missing URL or KEY falls back to the
 `MERIDIAN_URL` / `MERIDIAN_KEY` environment variables. Each client is one long-lived shared client per settings (per
@@ -38,7 +38,9 @@ try:
     from django.core.handlers.wsgi import WSGIRequest
     from django.http import HttpRequest, HttpResponse, HttpResponseBase, JsonResponse, StreamingHttpResponse
 except ImportError as missing:
-    raise ImportError('meridian.django needs Django: install it with `pip install "meridian[django]"`.') from missing
+    raise ImportError(
+        'gauss_meridian.django needs Django: install it with `pip install "gauss-meridian[django]"`.'
+    ) from missing
 
 from ._client import AsyncMeridian, Meridian, async_shared_client, shared_client
 from .forward import GENERIC_MESSAGE, AllowRule, AsyncForwarder, AsyncReplyBody, Forwarder, Reply, ReplyBody

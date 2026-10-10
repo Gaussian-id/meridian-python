@@ -105,7 +105,7 @@ def test_a_future_http_date_is_a_wait() -> None:
     from datetime import datetime, timedelta, timezone
     from email.utils import format_datetime
 
-    from meridian._transport import retry_after_seconds
+    from gauss_meridian._transport import retry_after_seconds
 
     date = format_datetime(datetime.now(timezone.utc) + timedelta(seconds=10), usegmt=True)
     assert 8 < (retry_after_seconds(date) or 0) <= 10
@@ -114,7 +114,7 @@ def test_a_future_http_date_is_a_wait() -> None:
 
 @pytest.mark.parametrize('value', ODD_HTTP_DATES)
 def test_an_odd_http_date_is_no_wait_and_never_raises(value: str) -> None:
-    from meridian._transport import retry_after_seconds, valid_retry_after
+    from gauss_meridian._transport import retry_after_seconds, valid_retry_after
 
     assert retry_after_seconds(value) is None
     assert valid_retry_after(value) in (None, value)  # a date the engine could send or not: only a raise is wrong
@@ -125,7 +125,7 @@ def test_an_odd_http_date_is_no_wait_and_never_raises(value: str) -> None:
 async def test_an_odd_retry_after_date_is_an_error_value_from_every_client(
     mode: str, engine: Any, clock: list[float], value: str, status: int
 ) -> None:
-    from meridian.admin import AsyncMeridianAdmin, MeridianAdmin
+    from gauss_meridian.admin import AsyncMeridianAdmin, MeridianAdmin
 
     code = 'invalid_request' if status == 400 else 'rate_limited'
     scripted = [Scripted(status=status, headers={'retry-after': value}, json=engine_error(code).json)] * 3
@@ -297,7 +297,7 @@ async def test_no_idempotency_key_means_one_is_made(mode: str, engine: Any, key:
 async def test_cancellation_during_the_backoff_propagates(engine: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     import asyncio
 
-    import meridian._clock as clock_module
+    import gauss_meridian._clock as clock_module
 
     async def cancelled(seconds: float) -> None:
         raise asyncio.CancelledError

@@ -10,14 +10,14 @@ from typing import TYPE_CHECKING, Any, cast
 import httpx
 import pytest
 
-from meridian import Ok
-from meridian.admin import AsyncMeridianAdmin, MeridianAdmin, Secret
+from gauss_meridian import Ok
+from gauss_meridian.admin import AsyncMeridianAdmin, MeridianAdmin, Secret
 from tests.support.fake_engine import Scripted, engine_error
 from tests.support.modes import resolve
 from tests.support.spec import UNWRAPPED_OPERATIONS, integrator_operations, wrapped_operations
 
 if TYPE_CHECKING:
-    from meridian._generated.admin import (
+    from gauss_meridian._generated.admin import (
         CreateOrganisation,
         CreateProject,
         IssueKey,
@@ -637,7 +637,7 @@ async def test_the_issued_key_does_not_print_through_logging(
     mode: str, engine: Any, caplog: pytest.LogCaptureFixture
 ) -> None:
     result = await issue(mode, engine)
-    log = logging.getLogger('meridian.tests.issued')
+    log = logging.getLogger('gauss_meridian.tests.issued')
     with caplog.at_level(logging.DEBUG):
         log.info('issued %s', result)
         log.info('issued %r', result)
@@ -880,7 +880,7 @@ async def test_a_body_that_is_circular_is_a_refusal_never_a_raise(mode: str, eng
 
 
 async def test_a_cancelled_wait_propagates_and_sends_nothing_more(engine: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-    import meridian._clock as clock_module
+    import gauss_meridian._clock as clock_module
 
     async def cancelled(seconds: float) -> None:
         raise asyncio.CancelledError
@@ -944,7 +944,7 @@ async def test_a_byok_credential_given_as_text_is_held_as_a_secret_and_sent_unch
         # What a frame-locals error reporter (pytest --showlocals, Sentry) would capture from the SDK's transport
         sent.append(request.read())
         for frame, _ in traceback.walk_stack(None):
-            if frame.f_globals.get('__name__') == 'meridian._transport':
+            if frame.f_globals.get('__name__') == 'gauss_meridian._transport':
                 held.append(repr(frame.f_locals))
         return httpx.Response(200, json={'provider': 'gemini', 'hint': 'qqqq'})
 

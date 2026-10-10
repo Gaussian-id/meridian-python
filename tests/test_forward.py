@@ -12,9 +12,9 @@ import anyio
 import httpx
 import pytest
 
-from meridian import AsyncMeridian, Meridian
-from meridian._client import async_shared_client, shared_client
-from meridian.forward import (
+from gauss_meridian import AsyncMeridian, Meridian
+from gauss_meridian._client import async_shared_client, shared_client
+from gauss_meridian.forward import (
     APP_CREDENTIAL_CODES,
     MAX_BODY_BYTES,
     MAX_EVENT_BYTES,
@@ -1456,7 +1456,7 @@ UNUSABLE = [
 
 @pytest.mark.parametrize('settings', UNUSABLE)
 def test_an_unusable_configuration_is_never_cached(settings: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
-    from meridian._client import shared_client
+    from gauss_meridian._client import shared_client
 
     monkeypatch.delenv('MERIDIAN_URL', raising=False)
     monkeypatch.delenv('MERIDIAN_KEY', raising=False)
@@ -1469,7 +1469,7 @@ def test_an_unusable_configuration_is_never_cached(settings: dict[str, Any], mon
 async def test_an_unusable_configuration_is_never_cached_for_async_either(
     settings: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from meridian._client import async_shared_client
+    from gauss_meridian._client import async_shared_client
 
     monkeypatch.delenv('MERIDIAN_URL', raising=False)
     monkeypatch.delenv('MERIDIAN_KEY', raising=False)
@@ -1479,7 +1479,7 @@ async def test_an_unusable_configuration_is_never_cached_for_async_either(
 
 
 async def test_a_usable_configuration_is_cached_once_it_is_fixed(mode: str, monkeypatch: pytest.MonkeyPatch) -> None:
-    from meridian._client import async_shared_client, shared_client
+    from gauss_meridian._client import async_shared_client, shared_client
 
     make = shared_client if mode == 'sync' else async_shared_client
     monkeypatch.delenv('MERIDIAN_URL', raising=False)
@@ -1491,7 +1491,7 @@ async def test_a_usable_configuration_is_cached_once_it_is_fixed(mode: str, monk
 
 
 def test_closed_event_loops_do_not_pile_up_in_the_shared_async_cache(monkeypatch: pytest.MonkeyPatch) -> None:
-    from meridian import _client  # pyright: ignore[reportPrivateUsage]  (the cache itself is what is under test)
+    from gauss_meridian import _client  # pyright: ignore[reportPrivateUsage]  (the cache itself is what is under test)
 
     Recorder(monkeypatch)
     monkeypatch.setenv('MERIDIAN_URL', 'http://pileup.engine.test')
@@ -1580,7 +1580,7 @@ async def test_a_relay_closed_inside_a_cancelled_scope_still_closes_upstream(eng
 async def test_the_relays_close_is_bounded(engine: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     # The bound is patched small and the slow close is finite, so an unbounded relay finishes late and fails the
     # assertions instead of hanging the suite
-    monkeypatch.setattr('meridian.forward.CLOSE_WITHIN', 0.2)
+    monkeypatch.setattr('gauss_meridian.forward.CLOSE_WITHIN', 0.2)
     held = _SlowClose(seconds=2)
     body = await slow_stream_body(engine, held)
     assert await body.__anext__() == frame(chunk('a')).encode()
@@ -1939,7 +1939,7 @@ async def test_a_read_body_that_is_its_own_iterator_is_closed_once(mode: str, en
 
 
 def test_the_module_lists_its_public_names() -> None:
-    import meridian.forward as forward
+    import gauss_meridian.forward as forward
 
     # Only what an adapter or an app needs is listed; the constants stay importable for those who look
     expected = {
@@ -1957,11 +1957,11 @@ def test_the_module_lists_its_public_names() -> None:
 
 
 def test_the_engine_versions_are_exported() -> None:
-    import meridian
+    import gauss_meridian
 
-    assert re.fullmatch(r'[0-9a-f]{12}', meridian.ENGINE_SPEC_COMMIT)
-    assert meridian.ENGINE_API_VERSION and isinstance(meridian.ENGINE_API_VERSION, str)
-    assert {'ENGINE_API_VERSION', 'ENGINE_SPEC_COMMIT'} <= set(meridian.__all__)
+    assert re.fullmatch(r'[0-9a-f]{12}', gauss_meridian.ENGINE_SPEC_COMMIT)
+    assert gauss_meridian.ENGINE_API_VERSION and isinstance(gauss_meridian.ENGINE_API_VERSION, str)
+    assert {'ENGINE_API_VERSION', 'ENGINE_SPEC_COMMIT'} <= set(gauss_meridian.__all__)
 
 
 # --- Stream content the guard cannot judge fails closed ---------------------------------------------------------------

@@ -30,10 +30,10 @@ from django.http import HttpRequest, HttpResponseBase, HttpResponseRedirect, Jso
 from django.test import AsyncClient, AsyncRequestFactory, RequestFactory, override_settings
 from django.urls import clear_url_caches, path
 
-from meridian import AsyncMeridian, Meridian
-from meridian._client import async_shared_client, shared_client
-from meridian.django import async_forward_view, async_meridian_client, forward_view, meridian_client
-from meridian.forward import AsyncReplyBody, ReplyBody
+from gauss_meridian import AsyncMeridian, Meridian
+from gauss_meridian._client import async_shared_client, shared_client
+from gauss_meridian.django import async_forward_view, async_meridian_client, forward_view, meridian_client
+from gauss_meridian.forward import AsyncReplyBody, ReplyBody
 from tests import django_settings
 from tests.support.adapter_contract import CHAT, CHECKS, MEBIBYTE, MESSAGES, STREAM, Wire, allow
 from tests.support.fake_engine import Scripted, chunk, frame

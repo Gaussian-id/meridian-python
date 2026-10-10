@@ -243,6 +243,64 @@ wheels = [
 ]
 
 [[package]]
+name = "gauss-meridian"
+version = "0.0.0"
+source = { editable = "." }
+dependencies = [
+    { name = "httpx" },
+]
+
+[package.optional-dependencies]
+django = [
+    { name = "django", version = "5.2.18", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
+    { name = "django", version = "6.1.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+]
+fastapi = [
+    { name = "fastapi" },
+]
+flask = [
+    { name = "flask" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "anyio" },
+    { name = "black" },
+    { name = "datamodel-code-generator" },
+    { name = "django", version = "5.2.18", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
+    { name = "django", version = "6.1.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "fastapi" },
+    { name = "flask" },
+    { name = "isort" },
+    { name = "pyright" },
+    { name = "pytest" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "django", marker = "extra == 'django'", specifier = ">=4.2" },
+    { name = "fastapi", marker = "extra == 'fastapi'", specifier = ">=0.110" },
+    { name = "flask", marker = "extra == 'flask'", specifier = ">=3.0" },
+    { name = "httpx", specifier = ">=0.27,<1" },
+]
+provides-extras = ["fastapi", "django", "flask"]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "anyio", specifier = ">=4" },
+    { name = "black", specifier = "==26.10.0" },
+    { name = "datamodel-code-generator", specifier = "==0.83.0" },
+    { name = "django", specifier = ">=4.2" },
+    { name = "fastapi", specifier = ">=0.110" },
+    { name = "flask", specifier = ">=3.0" },
+    { name = "isort", specifier = "==8.0.1" },
+    { name = "pyright", specifier = ">=1.1.380" },
+    { name = "pytest", specifier = ">=8" },
+    { name = "ruff", specifier = ">=0.6" },
+]
+
+[[package]]
 name = "genson"
 version = "1.4.0"
 source = { registry = "https://pypi.org/simple" }
@@ -490,64 +548,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/81/99/157e10966b033b363aeda5263e82596ee232a0b1d082fdbf90aa417ff083/markupsafe-3.0.4-cp315-cp315t-win32.whl", hash = "sha256:e49fb0d1ce92cfa0cb198cc5b1b11cdf9d0638658e2a2db2687e39db7c87fc78", size = 14300, upload-time = "2026-10-02T23:06:53.241Z" },
     { url = "https://files.pythonhosted.org/packages/33/05/55884815414c9706a23deca150b72c25a62109e65b0b6ce232077802c719/markupsafe-3.0.4-cp315-cp315t-win_amd64.whl", hash = "sha256:4f6e0852a0283b1b1fd776eeb7b766a5f440b3e2bd31ab51af3b400585f3965c", size = 14522, upload-time = "2026-10-02T23:06:54.729Z" },
     { url = "https://files.pythonhosted.org/packages/92/f9/ecbde7149e95b8a0f18e16d5d747f7dc06049d5da2e4f77f6f5e4a1f46a8/markupsafe-3.0.4-cp315-cp315t-win_arm64.whl", hash = "sha256:39dbacefc411633db5b4378b066a9aca70a3d7e2922c9e578d825f844026eeba", size = 14417, upload-time = "2026-10-02T23:06:56.246Z" },
-]
-
-[[package]]
-name = "meridian"
-version = "0.0.0"
-source = { editable = "." }
-dependencies = [
-    { name = "httpx" },
-]
-
-[package.optional-dependencies]
-django = [
-    { name = "django", version = "5.2.18", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
-    { name = "django", version = "6.1.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
-]
-fastapi = [
-    { name = "fastapi" },
-]
-flask = [
-    { name = "flask" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "anyio" },
-    { name = "black" },
-    { name = "datamodel-code-generator" },
-    { name = "django", version = "5.2.18", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
-    { name = "django", version = "6.1.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
-    { name = "fastapi" },
-    { name = "flask" },
-    { name = "isort" },
-    { name = "pyright" },
-    { name = "pytest" },
-    { name = "ruff" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "django", marker = "extra == 'django'", specifier = ">=4.2" },
-    { name = "fastapi", marker = "extra == 'fastapi'", specifier = ">=0.110" },
-    { name = "flask", marker = "extra == 'flask'", specifier = ">=3.0" },
-    { name = "httpx", specifier = ">=0.27,<1" },
-]
-provides-extras = ["fastapi", "django", "flask"]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "anyio", specifier = ">=4" },
-    { name = "black", specifier = "==26.10.0" },
-    { name = "datamodel-code-generator", specifier = "==0.83.0" },
-    { name = "django", specifier = ">=4.2" },
-    { name = "fastapi", specifier = ">=0.110" },
-    { name = "flask", specifier = ">=3.0" },
-    { name = "isort", specifier = "==8.0.1" },
-    { name = "pyright", specifier = ">=1.1.380" },
-    { name = "pytest", specifier = ">=8" },
-    { name = "ruff", specifier = ">=0.6" },
 ]
 
 [[package]]

@@ -2,9 +2,9 @@ import json
 from pathlib import Path
 from typing import get_args, get_type_hints
 
-import meridian
-from meridian import ErrorCode, ErrorType, MeridianError
-from meridian._errors import ENGINE_ERROR_CODES, ENGINE_ERROR_TYPES
+import gauss_meridian
+from gauss_meridian import ErrorCode, ErrorType, MeridianError
+from gauss_meridian._errors import ENGINE_ERROR_CODES, ENGINE_ERROR_TYPES
 
 ROOT = Path(__file__).resolve().parents[1]
 SDK_CODES = ('network_error', 'aborted')
@@ -41,4 +41,4 @@ def test_error_type_is_the_engines_five_types_and_client_error() -> None:
 def test_meridian_error_is_typed_with_them_and_exports_them() -> None:
     hints = get_type_hints(MeridianError)
     assert hints['code'] == ErrorCode and hints['type'] == ErrorType
-    assert {'ErrorCode', 'ErrorType'} <= set(meridian.__all__)
+    assert {'ErrorCode', 'ErrorType'} <= set(gauss_meridian.__all__)

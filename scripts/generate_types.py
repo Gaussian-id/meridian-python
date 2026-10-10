@@ -1,6 +1,6 @@
 """Generate TypedDicts from the pinned engine documents. `--check` fails when the committed output is stale.
 
-Rule: runtime code never imports meridian._generated outside `if TYPE_CHECKING:`; the generated modules need
+Rule: runtime code never imports gauss_meridian._generated outside `if TYPE_CHECKING:`; the generated modules need
 typing_extensions, which is a dev-only dependency. The versions of datamodel-code-generator, black and isort are
 pinned exactly in pyproject.toml so output cannot change silently.
 """
@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, cast
 
 ROOT = Path(__file__).resolve().parents[1]
-OUT = ROOT / 'src' / 'meridian' / '_generated'
+OUT = ROOT / 'src' / 'gauss_meridian' / '_generated'
 PRICED = re.compile('cost|price|per_million|recovery_rate|write_off_rate', re.IGNORECASE)
 PRICED_SCHEMA = re.compile('cost|price', re.IGNORECASE)
 COMPONENT_REF = '#/components/'

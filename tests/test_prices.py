@@ -5,7 +5,7 @@ from typing import Any, cast
 
 import pytest
 
-from meridian._prices import without_prices
+from gauss_meridian._prices import without_prices
 
 # D-27: nothing priced, and none of the rates the operator earns on, may reach an integrator
 PRICED = re.compile(

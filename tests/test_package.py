@@ -41,7 +41,7 @@ def dist(tmp_path_factory: pytest.TempPathFactory) -> Path:
 
 
 def wheel_of(dist: Path) -> Path:
-    return next(dist.glob('meridian-*.whl'))
+    return next(dist.glob('gauss_meridian-*.whl'))
 
 
 def wheel_files(dist: Path) -> dict[str, bytes]:
@@ -51,34 +51,41 @@ def wheel_files(dist: Path) -> dict[str, bytes]:
 
 def sdist_files(dist: Path) -> dict[str, bytes]:
     files: dict[str, bytes] = {}
-    with tarfile.open(next(dist.glob('meridian-*.tar.gz'))) as sdist:
+    with tarfile.open(next(dist.glob('gauss_meridian-*.tar.gz'))) as sdist:
         for member in sdist.getmembers():
             extracted = sdist.extractfile(member) if member.isfile() else None
             if extracted is not None:
-                files[member.name.partition('/')[2]] = extracted.read()  # without the meridian-0.0.0/ prefix
+                files[member.name.partition('/')[2]] = extracted.read()  # without the gauss_meridian-0.0.0/ prefix
     return files
 
 
 def test_the_wheel_ships_the_typed_package(dist: Path) -> None:
     names = set(wheel_files(dist))
     for required in (
-        'meridian/py.typed',
-        'meridian/__init__.py',
-        'meridian/forward.py',
-        'meridian/admin.py',
-        'meridian/types.py',
-        'meridian/fastapi.py',
-        'meridian/django.py',
-        'meridian/flask.py',
-        'meridian/_generated/public.py',
-        'meridian/_generated/admin.py',
+        'gauss_meridian/py.typed',
+        'gauss_meridian/__init__.py',
+        'gauss_meridian/forward.py',
+        'gauss_meridian/admin.py',
+        'gauss_meridian/types.py',
+        'gauss_meridian/fastapi.py',
+        'gauss_meridian/django.py',
+        'gauss_meridian/flask.py',
+        'gauss_meridian/_generated/public.py',
+        'gauss_meridian/_generated/admin.py',
     ):
         assert required in names, required
 
 
 def test_the_sdist_ships_the_package_source(dist: Path) -> None:
     names = set(sdist_files(dist))
-    for required in ('src/meridian/py.typed', 'src/meridian/flask.py', 'pyproject.toml', 'README.md', 'LICENSE'):
+    required_files = (
+        'src/gauss_meridian/py.typed',
+        'src/gauss_meridian/flask.py',
+        'pyproject.toml',
+        'README.md',
+        'LICENSE',
+    )
+    for required in required_files:
         assert required in names, required
 
 
@@ -108,7 +115,7 @@ def test_httpx_is_the_only_runtime_dependency_and_each_extra_adds_only_its_frame
 
 
 def run_wheel(dist: Path, body: str, *, block_frameworks: bool) -> subprocess.CompletedProcess[str]:
-    """Run `body` in a fresh, isolated interpreter that imports meridian from the built wheel."""
+    """Run `body` in a fresh, isolated interpreter that imports gauss_meridian from the built wheel."""
     code = f'import importlib.abc, sys\nsys.path.insert(0, {str(wheel_of(dist))!r})\nFRAMEWORKS = {FRAMEWORKS!r}\n'
     if block_frameworks:
         code += (
@@ -124,8 +131,8 @@ def run_wheel(dist: Path, body: str, *, block_frameworks: bool) -> subprocess.Co
 
 
 CORE = (
-    'import meridian, meridian.forward, meridian.admin, meridian.types\n'
-    'assert meridian.__file__.startswith(sys.path[0]), meridian.__file__\n'
+    'import gauss_meridian, gauss_meridian.forward, gauss_meridian.admin, gauss_meridian.types\n'
+    'assert gauss_meridian.__file__.startswith(sys.path[0]), gauss_meridian.__file__\n'
     "loaded = sorted(m for m in sys.modules if m.partition('.')[0] in FRAMEWORKS)\n"
     'assert not loaded, loaded\n'
 )
@@ -139,22 +146,23 @@ def test_the_core_imports_without_any_framework(dist: Path, block_frameworks: bo
 
 @pytest.mark.parametrize('extra', list(EXTRAS))
 def test_an_adapter_without_its_framework_names_the_extra(dist: Path, extra: str) -> None:
-    body = f'try:\n    import meridian.{extra}\nexcept ImportError as missing:\n    print(missing)\n'
+    body = f'try:\n    import gauss_meridian.{extra}\nexcept ImportError as missing:\n    print(missing)\n'
     result = run_wheel(dist, body, block_frameworks=True)
     assert result.returncode == 0, result.stderr
-    assert f'meridian.{extra} needs' in result.stdout and f'pip install "meridian[{extra}]"' in result.stdout
+    assert f'gauss_meridian.{extra} needs' in result.stdout
+    assert f'pip install "gauss-meridian[{extra}]"' in result.stdout
 
 
 @pytest.mark.parametrize('extra', list(EXTRAS))
 def test_an_adapter_with_its_framework_imports(dist: Path, extra: str) -> None:
-    result = run_wheel(dist, f'import meridian.{extra}\n', block_frameworks=False)
+    result = run_wheel(dist, f'import gauss_meridian.{extra}\n', block_frameworks=False)
     assert result.returncode == 0, result.stderr
 
 
 def test_the_source_holds_no_invisible_character_and_no_pyright_ignore() -> None:
     # An invisible character is written as an escape (a reader cannot see a literal BOM), and the source type-checks
     # without suppressing anything
-    for path in sorted((ROOT / 'src' / 'meridian').rglob('*.py')):
+    for path in sorted((ROOT / 'src' / 'gauss_meridian').rglob('*.py')):
         text = path.read_text(encoding='utf-8')
         assert chr(0xFEFF) not in text and chr(0x200B) not in text, path
         if '_generated' not in path.parts:

@@ -1,4 +1,4 @@
-"""Flask glue: a client from app config and a ready forwarding blueprint. Install with `meridian[flask]`.
+"""Flask glue: a client from app config and a ready forwarding blueprint. Install with `gauss-meridian[flask]`.
 
 `app.config['MERIDIAN_URL']` and `app.config['MERIDIAN_KEY']` configure the client; a missing one falls back to the
 `MERIDIAN_URL` / `MERIDIAN_KEY` environment variables. The client is one long-lived shared client per settings, never
@@ -26,7 +26,9 @@ try:
     from werkzeug.exceptions import RequestEntityTooLarge
     from werkzeug.wrappers import Response as BaseResponse
 except ImportError as missing:
-    raise ImportError('meridian.flask needs Flask: install it with `pip install "meridian[flask]"`.') from missing
+    raise ImportError(
+        'gauss_meridian.flask needs Flask: install it with `pip install "gauss-meridian[flask]"`.'
+    ) from missing
 
 from ._client import Meridian, shared_client
 from .forward import AllowRule, Forwarder, Reply, ReplyBody

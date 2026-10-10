@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from meridian import AsyncMeridian
+from gauss_meridian import AsyncMeridian
 from tests.support.fake_engine import Scripted, chunk, engine_error, envelope, frame, usage_chunk
 from tests.support.modes import make_client, resolve
 

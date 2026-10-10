@@ -17,10 +17,10 @@ from fastapi.responses import JSONResponse, RedirectResponse, Response, Streamin
 from starlette.requests import ClientDisconnect
 from starlette.types import Message, Scope
 
-from meridian import AsyncMeridian
-from meridian._client import async_shared_client
-from meridian.fastapi import forward_route, meridian_client
-from meridian.forward import AsyncReplyBody
+from gauss_meridian import AsyncMeridian
+from gauss_meridian._client import async_shared_client
+from gauss_meridian.fastapi import forward_route, meridian_client
+from gauss_meridian.forward import AsyncReplyBody
 from tests.support.adapter_contract import CHAT, CHECKS, STREAM, Wire, allow
 from tests.support.fake_engine import Scripted, chunk, engine_error, frame
 from tests.support.recorder import Recorder

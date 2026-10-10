@@ -1,7 +1,7 @@
 """Public request and reply types: aliases over the TypedDicts generated from the engine's documents.
 
 A type checker sees the generated TypedDicts. At run time each name is a plain alias of `dict[str, Any]`, so
-`from meridian.types import ChatParams` never raises outside `TYPE_CHECKING` (the generated module imports
+`from gauss_meridian.types import ChatParams` never raises outside `TYPE_CHECKING` (the generated module imports
 `typing_extensions`, a development dependency, and is never imported at run time).
 """
 

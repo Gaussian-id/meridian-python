@@ -13,11 +13,11 @@ import pytest
 from flask import Flask, jsonify, make_response
 from werkzeug.wrappers import Response as WerkzeugResponse
 
-import meridian.flask
-from meridian import Meridian
-from meridian._client import shared_client
-from meridian.flask import MeridianExtension, forward_blueprint, meridian_client
-from meridian.forward import ReplyBody
+import gauss_meridian.flask
+from gauss_meridian import Meridian
+from gauss_meridian._client import shared_client
+from gauss_meridian.flask import MeridianExtension, forward_blueprint, meridian_client
+from gauss_meridian.forward import ReplyBody
 from tests.support.adapter_contract import CHAT, CHECKS, MESSAGES, STREAM, Wire, allow
 from tests.support.fake_engine import Scripted, chunk, engine_error, frame
 from tests.support.recorder import Recorder
@@ -308,7 +308,7 @@ def test_the_blueprints_default_client_is_meridian_client(engine: Any, monkeypat
         made.append(sync_client(engine))
         return made[-1]
 
-    monkeypatch.setattr(meridian.flask, 'meridian_client', stand_in)
+    monkeypatch.setattr(gauss_meridian.flask, 'meridian_client', stand_in)
     r = app_with(forward_blueprint(authorize=allow)).test_client().post(ROUTE, json={'messages': MESSAGES})
     assert r.status_code == 200 and len(made) == 1 and len(engine.requests) == 1
 

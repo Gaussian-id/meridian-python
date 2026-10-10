@@ -3,7 +3,7 @@ from __future__ import annotations
 import inspect
 from typing import Any
 
-from meridian import AsyncMeridian, Meridian
+from gauss_meridian import AsyncMeridian, Meridian
 
 MODES = ['sync', 'async']
 

@@ -4,9 +4,9 @@ from typing import Any, cast
 import httpx
 import pytest
 
-from meridian import AsyncMeridian, Meridian, MeridianError, Ok
-from meridian._errors import error_from_body
-from meridian.admin import AsyncMeridianAdmin, MeridianAdmin
+from gauss_meridian import AsyncMeridian, Meridian, MeridianError, Ok
+from gauss_meridian._errors import error_from_body
+from gauss_meridian.admin import AsyncMeridianAdmin, MeridianAdmin
 from tests.support.fake_engine import Scripted, completion
 from tests.support.modes import make_client, resolve
 
