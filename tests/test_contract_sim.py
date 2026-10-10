@@ -39,11 +39,13 @@ def canary() -> None:
         {'model': MODEL, 'messages': MSG}
     )
     data = result.data
+    usage = data.get('usage') if data is not None else None
     if (
         result.error is not None
         or data is None
         or data['choices'][0]['message']['content'] != FIXED
-        or data['usage']['completion_tokens'] != 10
+        or usage is None
+        or usage.get('completion_tokens') != 10
     ):
         pytest.exit('The canary failed: the engine did not answer with the simulator reply. Stop and tear down.', 1)
 
