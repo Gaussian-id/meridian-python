@@ -15,6 +15,8 @@ from typing import Any, cast
 
 import pytest
 
+from tests.support.fake_docker import FakeDocker
+
 pytestmark = pytest.mark.fake_only
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -60,7 +62,7 @@ def runtime_with(tmp_path: Path, text: str = 'GAUSSMERIDIAN_DB_PASSWORD=x\n') ->
 
 
 def run_main(environ: dict[str, str], calls: Calls) -> int:
-    return int(script.main(environ, ready=calls.ready, runner=calls.run))
+    return int(script.main(environ, ready=calls.ready, runner=calls.run, docker=FakeDocker.for_environ(environ)))
 
 
 @pytest.fixture(autouse=True)
@@ -108,6 +110,19 @@ def test_a_non_loopback_url_refuses_before_anything_runs(tmp_path: Path, capsys:
     shown = capsys.readouterr()
     assert 'MERIDIAN_ADMIN_URL' in shown.err + shown.out
     assert 'evil' not in shown.err + shown.out
+    assert (calls.ready_urls, calls.runs) == ([], [])
+
+
+def test_an_engine_not_proven_to_be_the_simulator_refuses_before_anything_runs(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    environ, _ = runtime_with(tmp_path)
+    docker = FakeDocker.for_environ(environ)
+    docker.tokens.remove('gemini_dummy')  # a real key in the engine
+    calls = Calls()
+    assert int(script.main(environ, ready=calls.ready, runner=calls.run, docker=docker)) == 1
+    shown = capsys.readouterr()
+    assert 'gemini_dummy' in shown.err
     assert (calls.ready_urls, calls.runs) == ([], [])
 
 
@@ -189,7 +204,8 @@ def test_a_trailing_slash_on_the_url_still_asks_for_ready(tmp_path: Path) -> Non
         seen.append(url)
         return False
 
-    script.main({**environ, 'MERIDIAN_PUBLIC_URL': 'http://127.0.0.1:8180/'}, ready=ready, runner=Calls().run)
+    env = {**environ, 'MERIDIAN_PUBLIC_URL': 'http://127.0.0.1:8180/'}
+    script.main(env, ready=ready, runner=Calls().run, docker=FakeDocker.for_environ(env))
     assert seen == ['http://127.0.0.1:8180/']
     assert script.ready_endpoint('http://127.0.0.1:8180/') == 'http://127.0.0.1:8180/ready'
     assert script.ready_endpoint('http://127.0.0.1:8180') == 'http://127.0.0.1:8180/ready'

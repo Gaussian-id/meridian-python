@@ -1,6 +1,6 @@
-"""Contract run against the real local engine. It refuses on a paid provider key, a path outside the runtime folder,
-a non-loopback URL or a proxy; it never prints a value. The real run is deferred by the owner: this script only
-refuses, or launches the suite when the guard allows it.
+"""Contract run against the real local engine in simulator mode. It refuses on a paid provider key, a path outside the
+runtime folder, a non-loopback URL, a proxy, or an engine that docker cannot prove to be the simulator started from
+this runtime's env file; it never prints a value. It refuses, or launches the suite when the guard allows it.
 
     uv run python scripts/contract.py
 """
@@ -16,7 +16,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-from tests.support.contract_guard import DEFAULT_URLS, refusal, runtime_dir  # noqa: E402
+from tests.support.contract_guard import DEFAULT_URLS, DockerRunner, refusal, runtime_dir  # noqa: E402
 
 # --frozen: never resolve or sync; --offline: no index or other network access; --no-env-file: neither a .env file nor
 # UV_ENV_FILE adds variables
@@ -47,11 +47,12 @@ def main(
     *,
     ready: Callable[[str], bool] = engine_ready,
     runner: Callable[..., int] = subprocess.call,
+    docker: DockerRunner | None = None,
 ) -> int:
     environ = os.environ if environ is None else environ
 
     # [1] The guard decides first: nothing is contacted or launched on a refusal
-    reason = refusal(environ)
+    reason = refusal(environ, docker)
     if reason is not None:
         print(f'Contract run refused: {reason}', file=sys.stderr)
         return 1

@@ -14,18 +14,31 @@ from typing import Any
 
 import pytest
 
+from tests.support import contract_guard
 from tests.support.contract_guard import (
+    SIM_ENV,
+    SIM_TEMPLATE,
+    DockerRunner,
     is_inside,
     is_loopback_url,
     paid_keys_in,
     paid_keys_in_environ,
-    refusal,
     runtime_dir,
+    simulator_proof,
     unmarked_engine_tests,
 )
+from tests.support.contract_guard import refusal as guard_refusal
 from tests.support.engine import ContractEngine
+from tests.support.fake_docker import ENGINE_ID, FakeDocker
 
 pytestmark = pytest.mark.fake_only
+
+
+def refusal(environ: dict[str, str], docker: DockerRunner | None = None) -> str | None:
+    """The guard's judgement over a healthy simulator stack (unless the test brings its own docker): the real docker is
+    never asked."""
+    return guard_refusal(environ, docker or FakeDocker.for_environ(environ))
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -975,6 +988,201 @@ def test_the_default_urls_are_loopback(tmp_path: Path) -> None:
     assert refusal({**environ, 'MERIDIAN_PUBLIC_URL': ''}) is not None  # set but empty: not a loopback URL
 
 
+# -- the simulator proof (S1 to S4) --------------------------------------------------------------------------------
+
+
+def stack(tmp_path: Path, **environ: str) -> tuple[dict[str, str], Path, FakeDocker]:
+    env, folder = runtime_with(tmp_path)
+    env.update(environ)
+    return env, folder, FakeDocker.for_environ(env)
+
+
+def test_a_healthy_simulator_stack_is_proven_with_nothing_but_ps_port_and_formatted_inspect(tmp_path: Path) -> None:
+    environ, folder, docker = stack(tmp_path)
+    assert simulator_proof(environ, folder, docker) is None
+    assert refusal(environ, docker) is None
+    assert {call[0] for call in docker.calls} == {'ps', 'port', 'inspect'}
+    for call in docker.calls:
+        assert call[0] != 'inspect' or (call[2] == '--format' and len(call) == 4)  # never a raw inspect
+        assert 'logs' not in call
+    assert docker.calls[0][:2] == ['ps', '-q']
+
+
+def test_the_real_docker_is_what_runs_when_none_is_injected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    environ, _, docker = stack(tmp_path)
+    monkeypatch.setattr(contract_guard, 'run_docker', docker)
+    assert guard_refusal(environ) is None
+    assert docker.calls
+
+
+def test_the_template_compares_only_the_allowlisted_entries_and_prints_tokens() -> None:
+    assert [entry.split('=')[0] for _, entry in SIM_ENV] == [
+        'GAUSSMERIDIAN_GEMINI_BASE_URL',
+        'GAUSSMERIDIAN_OPENROUTER_BASE_URL',
+        'GAUSSMERIDIAN_PROVIDER_SIMULATOR',
+        'GAUSSMERIDIAN_GEMINI_API_KEY',
+        'GAUSSMERIDIAN_OPENROUTER_API_KEY',
+    ]
+    assert [entry for _, entry in SIM_ENV if entry.split('=')[0].endswith('_API_KEY')] == [
+        'GAUSSMERIDIAN_GEMINI_API_KEY=sim-local-key',
+        'GAUSSMERIDIAN_OPENROUTER_API_KEY=sim-local-key',
+    ]
+    assert SIM_TEMPLATE.startswith('{{range .Config.Env}}')
+    assert '{{if eq . "GAUSSMERIDIAN_PROVIDER_SIMULATOR=true"}}sim_flag {{end}}' in SIM_TEMPLATE
+
+
+def test_the_project_follows_the_local_project_variable(tmp_path: Path) -> None:
+    environ, folder, docker = stack(tmp_path, GAUSSMERIDIAN_LOCAL_PROJECT='meridian-sim')
+    assert simulator_proof(environ, folder, docker) is None
+    assert 'label=com.docker.compose.project=meridian-sim' in docker.calls[0]
+
+
+@pytest.mark.parametrize('project', ['Meridian', 'a b', 'a,label=x', '-x', '../x'])
+def test_a_project_that_is_not_a_plain_name_is_refused(tmp_path: Path, project: str) -> None:
+    environ, folder, docker = stack(tmp_path, GAUSSMERIDIAN_LOCAL_PROJECT=project)
+    assert simulator_proof(environ, folder, docker) == 'GAUSSMERIDIAN_LOCAL_PROJECT is not a plain project name.'
+    assert docker.calls == []
+
+
+BREAKS: dict[str, tuple[Callable[[FakeDocker], None], str]] = {
+    'no simulator': (lambda d: d.providers.clear(), 'provider-sim is not running exactly once'),
+    'two simulators': (lambda d: d.providers.append('c' * 12), 'provider-sim is not running exactly once'),
+    'a simulator id that is no id': (lambda d: d.providers.__setitem__(0, 'not-an-id'), 'provider-sim is not running'),
+    'no engine': (lambda d: d.engines.clear(), 'not exactly one engine container'),
+    'two engines': (lambda d: d.engines.append('c' * 64), 'not exactly one engine container'),
+    'an engine id that is no id': (lambda d: d.engines.__setitem__(0, 'ENGINE'), 'not exactly one engine container'),
+    'the public port elsewhere': (
+        lambda d: d.ports.__setitem__('8180/tcp', '0.0.0.0:8180'),
+        'does not own the public and admin ports',
+    ),
+    'the admin port not published': (
+        lambda d: d.ports.__delitem__('8181/tcp'),
+        'does not own the public and admin ports',
+    ),
+    'the public port on another host port': (
+        lambda d: d.ports.__setitem__('8180/tcp', '127.0.0.1:9180'),
+        'does not own the public and admin ports',
+    ),
+    'two bindings': (
+        lambda d: d.ports.__setitem__('8180/tcp', '127.0.0.1:8180\n[::]:8180'),
+        'does not own the public and admin ports',
+    ),
+    'a real gemini base url': (lambda d: d.tokens.remove('gemini_base'), 'missing: gemini_base)'),
+    'a real openrouter base url': (lambda d: d.tokens.remove('openrouter_base'), 'missing: openrouter_base)'),
+    'no simulator flag': (lambda d: d.tokens.remove('sim_flag'), 'missing: sim_flag)'),
+    'a real gemini key': (lambda d: d.tokens.remove('gemini_dummy'), 'missing: gemini_dummy)'),
+    'a real openrouter key': (lambda d: d.tokens.remove('openrouter_dummy'), 'missing: openrouter_dummy)'),
+    'no token at all': (lambda d: d.tokens.clear(), 'missing: gemini_base, openrouter_base, sim_flag'),
+    'a token that is not one of ours': (lambda d: d.tokens.append('real_key'), 'not set up for the simulator'),
+    'a label pointing elsewhere': (
+        lambda d: setattr(d, 'label', str(Path(d.label).parent / 'other.env')),
+        'not started from the env file of this runtime',
+    ),
+    'a label naming two files': (
+        lambda d: setattr(d, 'label', d.label + ',' + d.label),
+        'not started from the env file of this runtime',
+    ),
+    'no label and no marker': (lambda d: setattr(d, 'label', ''), 'not started from the env file of this runtime'),
+}
+
+
+@pytest.mark.parametrize('name', list(BREAKS))
+def test_anything_short_of_a_proven_simulator_is_refused_by_name_only(tmp_path: Path, name: str) -> None:
+    change, expected = BREAKS[name]
+    environ, folder, docker = stack(tmp_path)
+    change(docker)
+    reason = simulator_proof(environ, folder, docker)
+    assert reason is not None
+    assert expected in reason
+    assert refusal(environ, docker) == reason  # the whole judgement says the same
+    assert 'sim-local-key' not in reason and str(tmp_path) not in reason
+
+
+@pytest.mark.parametrize('command', ['ps', 'port', 'inspect'])
+def test_docker_that_cannot_be_asked_is_a_refusal(tmp_path: Path, command: str) -> None:
+    environ, folder, docker = stack(tmp_path)
+    docker.fail = command
+    assert simulator_proof(environ, folder, docker) == 'the simulator cannot be proven: docker cannot be asked.'
+
+
+def test_a_missing_docker_program_is_a_refusal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    environ, _, _ = stack(tmp_path)
+
+    def no_docker(args: object) -> str:
+        raise FileNotFoundError('docker')
+
+    monkeypatch.setattr(contract_guard, 'run_docker', no_docker)
+    assert guard_refusal(environ) == 'the simulator cannot be proven: docker cannot be asked.'
+
+
+def test_the_real_runner_runs_docker_with_a_fixed_argv_and_no_shell(monkeypatch: pytest.MonkeyPatch) -> None:
+    seen: list[tuple[Any, dict[str, Any]]] = []
+
+    def fake_run(argv: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        seen.append((argv, kwargs))
+        return subprocess.CompletedProcess(argv, 0, stdout='out', stderr='')
+
+    monkeypatch.setattr(subprocess, 'run', fake_run)
+    assert contract_guard.run_docker(['ps', '-q']) == 'out'
+    [(argv, kwargs)] = seen
+    assert argv == ['docker', 'ps', '-q']
+    assert not kwargs.get('shell') and kwargs['check'] is True and kwargs['timeout'] > 0
+
+
+def test_the_label_may_be_a_path_spelled_differently(tmp_path: Path) -> None:
+    environ, folder, docker = stack(tmp_path)
+    docker.label = str(folder / '.' / 'sub' / '..' / 'meridian-engine.env')
+    assert simulator_proof(environ, folder, docker) is None
+
+
+def test_the_env_file_override_is_the_file_the_label_must_name(tmp_path: Path) -> None:
+    environ, folder, _ = stack(tmp_path)
+    other = folder / 'other.env'
+    other.write_text('GAUSSMERIDIAN_DB_PASSWORD=x\n', encoding='utf-8')
+    environ['GAUSSMERIDIAN_ENV_FILE'] = str(other)
+    assert simulator_proof(environ, folder, FakeDocker(folder / 'meridian-engine.env')) is not None
+    assert simulator_proof(environ, folder, FakeDocker(other)) is None
+
+
+def test_without_a_label_the_runbooks_marker_for_this_engine_proves_the_binding(tmp_path: Path) -> None:
+    environ, folder, docker = stack(tmp_path)
+    docker.label = ''
+    (folder / f'.sim-started-{ENGINE_ID}').write_text(ENGINE_ID + '\n', encoding='utf-8')
+    assert simulator_proof(environ, folder, docker) is None
+    docker.label = '<no value>'
+    assert simulator_proof(environ, folder, docker) is None
+
+
+def test_a_marker_for_another_engine_proves_nothing(tmp_path: Path) -> None:
+    environ, folder, docker = stack(tmp_path)
+    docker.label = ''
+    (folder / f'.sim-started-{ENGINE_ID}').write_text('d' * 64, encoding='utf-8')
+    assert simulator_proof(environ, folder, docker) == 'the engine was not started from the env file of this runtime.'
+
+
+def test_a_label_that_names_another_file_is_not_rescued_by_a_marker(tmp_path: Path) -> None:
+    environ, folder, docker = stack(tmp_path)
+    docker.label = str(tmp_path / 'elsewhere.env')
+    (folder / f'.sim-started-{ENGINE_ID}').write_text(ENGINE_ID, encoding='utf-8')
+    assert simulator_proof(environ, folder, docker) is not None
+
+
+def test_a_real_mode_stack_is_refused_whatever_else_is_right(tmp_path: Path) -> None:
+    # real providers: the gemini and openrouter base urls and both keys are not the simulator's, no flag
+    environ, _, docker = stack(tmp_path)
+    docker.tokens = []
+    docker.providers = []
+    assert refusal(environ, docker) is not None
+
+
+def test_the_proof_comes_after_the_files_and_urls_and_before_the_proxy(tmp_path: Path) -> None:
+    environ, _, docker = stack(tmp_path)
+    docker.providers.clear()
+    assert 'provider-sim' in str(refusal({**environ, 'HTTPS_PROXY': 'http://p.example:1'}, docker))
+    assert 'is not a loopback URL' in str(refusal({**environ, 'MERIDIAN_ADMIN_URL': 'http://x.example'}, docker))
+    assert GEMINI in str(refusal({**environ, GEMINI: SECRET}, docker))
+
+
 # -- the engine the contract tests talk to -------------------------------------------------------------------------
 
 
@@ -999,6 +1207,7 @@ def test_the_contract_engine_reads_its_keys_from_the_checked_runtime_dir(
     (folder / 'sub' / 'local-api-key.txt').write_text(project + '\n', encoding='utf-8')
     (folder / 'sub' / 'local-integrator-key.txt').write_text(integrator + '\n', encoding='utf-8')
     monkeypatch.setattr(os, 'environ', {**environ, 'MERIDIAN_RUNTIME_DIR': str(folder / 'sub')})
+    monkeypatch.setattr(contract_guard, 'run_docker', FakeDocker.for_environ(environ))
     engine = ContractEngine('t::node')
     assert engine.requested_by == 't::node'
     assert (engine.project_key, engine.integrator_key) == (project, integrator)

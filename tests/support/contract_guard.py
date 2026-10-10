@@ -8,8 +8,9 @@ from __future__ import annotations
 import ipaddress
 import os
 import re
+import subprocess
 import urllib.request
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -144,8 +145,152 @@ def _paid_keys_in_file(path: Path) -> list[str] | None:
         return None
 
 
-def refusal(environ: Mapping[str, str]) -> str | None:
-    """Why a contract run must not start, or None when it may. Names only; never a value, path or URL."""
+DEFAULT_PROJECT = 'meridian-engine'
+_PROJECT_NAME = re.compile(r'[a-z0-9][a-z0-9_-]*')
+_CONTAINER_ID = re.compile(r'[0-9a-f]{12,64}')
+
+# The only environment entries the proof may compare, each by exact equality inside the docker template, so the output
+# is a token and never a value. The two paid keys are compared with the public dummy of deploy/compose.simulator.yaml
+# and with nothing else.
+SIM_ENV = (
+    ('gemini_base', 'GAUSSMERIDIAN_GEMINI_BASE_URL=http://provider-sim:8184/v1beta'),
+    ('openrouter_base', 'GAUSSMERIDIAN_OPENROUTER_BASE_URL=http://provider-sim:8184/api/v1'),
+    ('sim_flag', 'GAUSSMERIDIAN_PROVIDER_SIMULATOR=true'),
+    ('gemini_dummy', 'GAUSSMERIDIAN_GEMINI_API_KEY=sim-local-key'),
+    ('openrouter_dummy', 'GAUSSMERIDIAN_OPENROUTER_API_KEY=sim-local-key'),
+)
+SIM_TEMPLATE = (
+    '{{range .Config.Env}}' + ''.join(f'{{{{if eq . "{e}"}}}}{t} {{{{end}}}}' for t, e in SIM_ENV) + '{{end}}'
+)
+ENV_FILE_TEMPLATE = '{{index .Config.Labels "com.docker.compose.project.environment_file"}}'
+
+DockerRunner = Callable[[Sequence[str]], str]
+"""Runs `docker` with a fixed argv (no shell) and returns its stdout; any failure raises."""
+
+
+def run_docker(args: Sequence[str]) -> str:
+    """The real docker. Its output is read by the guard and never printed; nothing here is a network call."""
+    done = subprocess.run(
+        ['docker', *args],
+        capture_output=True,
+        text=True,
+        encoding='utf-8',
+        timeout=20,
+        check=True,
+        stdin=subprocess.DEVNULL,
+    )
+    return done.stdout
+
+
+def _lines(text: str) -> list[str]:
+    return [line.strip() for line in text.splitlines() if line.strip()]
+
+
+def _url_port(value: str) -> str | None:
+    try:
+        parts = urlsplit(value)
+        return str(parts.port or (443 if parts.scheme == 'https' else 80))
+    except ValueError:
+        return None
+
+
+def simulator_proof(environ: Mapping[str, str], runtime: Path, docker: DockerRunner | None = None) -> str | None:
+    """Why the engine on this machine is not proven to be in simulator mode and started from this runtime's env file,
+    or None when it is. S1 provider-sim runs; S2 exactly one engine owns the public and admin ports on 127.0.0.1;
+    S3 its provider settings are the simulator's (exact comparisons inside the docker template, tokens out); S4 it was
+    started from the env file of this runtime (the compose label, or the runbook's marker when the label is absent).
+    Any error counts as a refusal. Names only: no value of the engine's environment ever reaches this process's output,
+    and no command but ps, port and a formatted inspect is run (never `logs`, never a raw `inspect`)."""
+    ask = docker or run_docker
+    project = environ.get('GAUSSMERIDIAN_LOCAL_PROJECT') or DEFAULT_PROJECT
+    if not _PROJECT_NAME.fullmatch(project):
+        return 'GAUSSMERIDIAN_LOCAL_PROJECT is not a plain project name.'
+    unasked = 'the simulator cannot be proven: docker cannot be asked.'
+
+    def running(service: str) -> list[str] | None:
+        try:
+            return _lines(
+                ask(
+                    [
+                        'ps',
+                        '-q',
+                        '--filter',
+                        f'label=com.docker.compose.project={project}',
+                        '--filter',
+                        f'label=com.docker.compose.service={service}',
+                        '--filter',
+                        'status=running',
+                    ]
+                )
+            )
+        except Exception:
+            return None
+
+    def tell(*args: str) -> str | None:
+        try:
+            return ask(args)
+        except Exception:
+            return None
+
+    # [S1]
+    providers = running('provider-sim')
+    if providers is None:
+        return unasked
+    if len(providers) != 1 or not _CONTAINER_ID.fullmatch(providers[0]):
+        return 'provider-sim is not running exactly once, so this is not the simulator.'
+
+    # [S2]
+    engines = running('engine')
+    if engines is None:
+        return unasked
+    if len(engines) != 1 or not _CONTAINER_ID.fullmatch(engines[0]):
+        return 'there is not exactly one engine container running.'
+    engine = engines[0]
+    wanted = {
+        '8180/tcp': _url_port(environ.get('MERIDIAN_PUBLIC_URL', DEFAULT_URLS['MERIDIAN_PUBLIC_URL'])),
+        '8181/tcp': _url_port(environ.get('MERIDIAN_ADMIN_URL', DEFAULT_URLS['MERIDIAN_ADMIN_URL'])),
+    }
+    if None in wanted.values():
+        return 'MERIDIAN_PUBLIC_URL or MERIDIAN_ADMIN_URL cannot be read, so the engine ports cannot be compared.'
+    for port, host_port in wanted.items():
+        bound = tell('port', engine, port)
+        if bound is None:
+            return unasked
+        if _lines(bound) != [f'127.0.0.1:{host_port}']:
+            return 'the engine does not own the public and admin ports on 127.0.0.1 (ports differ from the URLs).'
+
+    # [S3]
+    printed = tell('inspect', engine, '--format', SIM_TEMPLATE)
+    if printed is None:
+        return unasked
+    tokens = printed.split()
+    missing = [token for token, _ in SIM_ENV if token not in tokens]
+    if missing:
+        return f'the engine is not set up for the simulator (missing: {", ".join(missing)}).'
+    if len(tokens) != len(SIM_ENV):
+        return 'the engine is not set up for the simulator.'
+
+    # [S4]
+    label = tell('inspect', engine, '--format', ENV_FILE_TEMPLATE)
+    if label is None:
+        return unasked
+    mine = Path(environ.get('GAUSSMERIDIAN_ENV_FILE') or runtime / ENV_FILE)
+    stated = label.strip()
+    refused = 'the engine was not started from the env file of this runtime.'
+    if stated and stated != '<no value>':
+        return None if _real(stated) == _real(mine) else refused
+    # No label: the runbook's marker, written in the runtime folder after local-up, holds this engine's id
+    try:
+        marker = (runtime / f'.sim-started-{engine}').read_text(encoding='utf-8').strip()
+    except (OSError, UnicodeDecodeError):
+        return refused
+    ok = _CONTAINER_ID.fullmatch(marker) and (marker.startswith(engine) or engine.startswith(marker))
+    return None if ok else refused
+
+
+def refusal(environ: Mapping[str, str], docker: DockerRunner | None = None) -> str | None:
+    """Why a contract run must not start, or None when it may. Names only; never a value, path or URL. `docker` is
+    injectable: tests never call the real one."""
     # [1] The runtime folder the engine's scripts use is the only place the guard trusts
     runtime = runtime_dir(environ)
     if runtime is None:
@@ -190,6 +335,12 @@ def refusal(environ: Mapping[str, str]) -> str | None:
         value = environ.get(name, DEFAULT_URLS.get(name))
         if value is not None and not is_loopback_url(value):
             return f'{name} is not a loopback URL (localhost, 127.0.0.0/8 or ::1).'
+
+    # [4.5] The engine must be proven to be the simulator, started from this runtime's env file. After the URLs, so the
+    #       ports it compares are loopback ones.
+    unproven = simulator_proof(environ, runtime, docker)
+    if unproven is not None:
+        return unproven
 
     # [5] No proxy between the suite and the engine
     proxies = proxy_schemes(environ)

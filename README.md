@@ -4,7 +4,7 @@ The Meridian SDK for Python: chat, streaming, provisioning and a forwarding rout
 
 **Status:** private and unpublished (it is not on PyPI); names and the public date are the owner's decision (O47).
 Python 3.10 or later. The suite runs against an in-memory fake engine; the run against a real local engine is
-deferred by the owner (see [Contract run](#contract-run)).
+simulator-only (see [Contract run](#contract-run)).
 
 The code examples below are illustrative: they need an engine at `MERIDIAN_URL` and keys in your environment. The test
 suite checks the same calls against its fake engine.
@@ -359,9 +359,21 @@ The supplier catalogue is not wrapped (it holds only supplier prices), nor are r
 ## Contract run
 
 The suite normally runs against an in-memory fake engine. `uv run python scripts/contract.py` runs it against the
-real local engine instead. That run is deferred by the owner and has not been made. The script refuses (naming
-variables only, never values) unless all of these hold:
+real local engine instead, and only an engine in simulator mode (a fake provider; no paid call is ever made). Start
+the engine first (the engine's `scripts/local-up` with both provider keys empty); the run changes nothing there.
+Run it with the same `LOCALAPPDATA` (or `XDG_STATE_HOME` / `HOME`) the engine was started with, and, if the engine
+project is not `meridian-engine`, `GAUSSMERIDIAN_LOCAL_PROJECT`. The script refuses (naming variables only, never
+values) unless all of these hold:
 
+- docker proves a live simulator, with fixed `docker ps`, `docker port` and formatted `docker inspect` calls (never
+  `logs`, never a raw inspect or environment): (S1) exactly one `provider-sim` container runs in the project; (S2)
+  exactly one `engine` container runs, owning `127.0.0.1:8180` and `:8181`, which match `MERIDIAN_PUBLIC_URL` and
+  `MERIDIAN_ADMIN_URL`; (S3) its provider base URLs are `provider-sim:8184`, `GAUSSMERIDIAN_PROVIDER_SIMULATOR` is
+  `true` and both paid keys equal the public dummy `sim-local-key` (compared inside the docker template, so only match
+  tokens come back); (S4) its compose `environment_file` label is the env file of the runtime folder checked below (or
+  `GAUSSMERIDIAN_ENV_FILE`), or, with no label, the runbook's marker `.sim-started-<container id>` in that folder holds
+  the engine's id. A throwaway runtime folder (a redirected `LOCALAPPDATA`) is accepted only because S1 to S4 prove the
+  running engine was started from it. Docker missing, or any error, is a refusal;
 - no paid provider key (`GAUSSMERIDIAN_GEMINI_API_KEY`, `GAUSSMERIDIAN_OPENROUTER_API_KEY`) is set in the process
   environment or in any engine env file: the canonical `meridian-engine.env`, the one in `MERIDIAN_RUNTIME_DIR`, and
   the `GAUSSMERIDIAN_ENV_FILE` target are all read. Any character outside printable ASCII and tab anywhere in the
@@ -382,12 +394,17 @@ variables only, never values) unless all of these hold:
 The suite runs as `uv run --frozen --offline --no-env-file pytest -m "not fake_only"`: nothing is resolved or
 downloaded and no `.env` file adds variables.
 
-What the guard does not cover: it reads files and its own environment, not the running engine. The environment of the
-process that runs `docker compose` (a bare `NAME` line inherits from it), a runtime folder made elsewhere through
-`LOCALAPPDATA`, and other variables that reach the network (`GAUSSMERIDIAN_DECISION_*`,
-`GAUSSMERIDIAN_USAGE_RECEIVER_URL`) are outside the two-key rule. Whether a contract run must require simulator mode
-or inspect the running engine container's environment (by name only) is an open owner decision; it is settled before
-any contract run.
+The simulator matrix (`tests/test_contract_sim.py`, marked `contract`, skipped in the normal suite) runs in sync and
+async mode: a canary first (the fixed reply `sim token 1` ... `sim token 10`, 10 completion tokens, no cost; a mismatch
+stops the session), chat create, an invalid key (`invalid_api_key`), a stream of exactly ten text pieces with usage,
+admin provisioning (organisation, project, key issued, listed, revoked), a revoked key used directly (refused),
+forwarding through the core forwarder and the FastAPI adapter, forwarding with the revoked key (the generic 503), and the
+`sim-fail` fallback (reply shape only). A mid-stream error cannot be produced by the simulator, so it stays fake-only.
+Each admin case creates its own organisation; the seeded keys are never revoked.
+
+What the guard does not cover: the environment of the process that runs `docker compose` (a bare `NAME` line inherits
+from it) and other variables that reach the network (`GAUSSMERIDIAN_DECISION_*`, `GAUSSMERIDIAN_USAGE_RECEIVER_URL`)
+are outside the two-key rule; in simulator mode the engine's own compose override fixes the provider settings.
 
 Engine-side carry (not changed here): `Get-EnvValue` in the engine's `scripts/local-common.ps1` uses a
 culture-sensitive `StartsWith`, which skips control characters, marks and some letters inside a name; it should use
