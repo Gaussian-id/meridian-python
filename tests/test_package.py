@@ -55,7 +55,7 @@ def sdist_files(dist: Path) -> dict[str, bytes]:
         for member in sdist.getmembers():
             extracted = sdist.extractfile(member) if member.isfile() else None
             if extracted is not None:
-                files[member.name.partition('/')[2]] = extracted.read()  # without the gauss_meridian-0.0.0/ prefix
+                files[member.name.partition('/')[2]] = extracted.read()  # without the gauss_meridian-<version>/ prefix
     return files
 
 

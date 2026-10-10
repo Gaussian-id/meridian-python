@@ -1,7 +1,7 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/brand/meridian-lockup-light.svg">
-    <img alt="Gauss Meridian" src="assets/brand/meridian-lockup-dark.svg" width="360">
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/Gaussian-id/meridian-python/main/assets/brand/meridian-lockup-light.svg">
+    <img alt="Gauss Meridian" src="https://raw.githubusercontent.com/Gaussian-id/meridian-python/main/assets/brand/meridian-lockup-dark.svg" width="360">
   </picture>
 </p>
 
@@ -9,9 +9,8 @@
 
 The official Python SDK for Gauss Meridian: one API for many AI models, routed by Meridian.
 
-**Status:** private and unpublished (it is not on PyPI); version 0.0.0; Python 3.10 or later. Names and the public date
-are the owner's decision (O47). The suite runs against an in-memory fake engine; the run against a real local engine is
-simulator-only (see [Contract run](#contract-run-simulator-only)).
+**Status:** Public preview, v0.1.0; Python 3.10 or later. The suite runs against an in-memory fake engine; the run
+against a real local engine is simulator-only (see [Contract run](#contract-run-simulator-only)).
 
 The code examples below are illustrative: they need an engine at `MERIDIAN_URL` and keys in your environment. The test
 suite checks the same calls against its fake engine.
@@ -43,13 +42,11 @@ pip install "gauss-meridian[django]"        # adds Django (>=4.2)
 pip install "gauss-meridian[flask]"         # adds Flask (>=3.0)
 ```
 
-The package is not published yet, so install it from a checkout of this repository until it is:
+With other tools:
 
 ```sh
-pip install ./meridian-python                    # from the folder that holds the checkout
-pip install "./meridian-python[fastapi]"         # or [django], or [flask]
-uv add ./meridian-python --extra django
-poetry add ./meridian-python --extras flask
+uv add gauss-meridian --extra django
+poetry add gauss-meridian --extras flask
 ```
 
 The distribution installs the import package `gauss_meridian`, so it does not clash with Google's `google-meridian`,
@@ -580,7 +577,7 @@ uv run python scripts/generate_types.py --check
 
 The suite runs on Python 3.10 and on the latest Python; `tests/test_package.py` builds the wheel and sdist with
 `uv build` into a temporary directory and checks what they ship: the package source, `README.md` and `LICENSE` ship,
-and `assets/` does not (the README's logo links are for the repository page only).
+and `assets/` does not (the README's logo links point at the repository's raw files, so they render on PyPI too).
 
 The Meridian logo is a Gaussian trademark; the Apache-2.0 licence covers the code, not the logo. The approved lockups
 are in `assets/brand/`.

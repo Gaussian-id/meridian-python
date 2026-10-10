@@ -1,12 +1,30 @@
 [project]
 name = "gauss-meridian"
-version = "0.0.0"
+version = "0.1.0"
 description = "Meridian SDK for Python: chat, streaming, provisioning and forwarding for the Meridian engine."
 readme = "README.md"
 license = { text = "Apache-2.0" }
 requires-python = ">=3.10"
 dependencies = ["httpx>=0.27,<1"]
-classifiers = ["Private :: Do Not Upload"]
+keywords = ["meridian", "gauss", "ai", "llm", "sdk", "streaming", "fastapi", "django", "flask"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: Apache Software License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Typing :: Typed",
+]
+
+[project.urls]
+Homepage = "https://github.com/Gaussian-id/meridian-python"
+Repository = "https://github.com/Gaussian-id/meridian-python"
+Issues = "https://github.com/Gaussian-id/meridian-python/issues"
 
 [project.optional-dependencies]
 fastapi = ["fastapi>=0.110"]

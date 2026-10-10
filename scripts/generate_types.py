@@ -140,7 +140,7 @@ def build(into: Path) -> dict[str, str]:
 
     source = json.loads((ROOT / 'spec' / 'SOURCE.json').read_text(encoding='utf-8'))
     version = (
-        "__version__ = '0.0.0'\n"
+        "__version__ = '0.1.0'\n"
         f"ENGINE_SPEC_COMMIT = '{source['engineCommit']}'\n"
         f"ENGINE_API_VERSION = '{source['publicVersion']}'\n"
     )

@@ -7,3 +7,9 @@ build/
 .ruff_cache/
 .superpowers/
 .omc/
+.env
+.env.*
+*.egg-info/
+.venv*/
+.coverage
+htmlcov/
