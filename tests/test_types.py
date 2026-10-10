@@ -161,6 +161,48 @@ def test_admin_results_are_typed_with_the_generated_reply_shapes(tmp_path: Path)
     assert sorted(d['range']['start']['line'] for d in misspelt) == expected, [d['message'] for d in errors]
 
 
+STREAM_SNIPPET = """\
+# pyright: strict
+from contextlib import aclosing
+
+from typing_extensions import assert_type
+
+from meridian import AsyncMeridian
+
+
+async def read(client: AsyncMeridian) -> None:
+    opened = await client.chat.stream({'messages': [{'role': 'user', 'content': 'Hi'}]})
+    if opened.error is None:
+        stream = opened.data
+        async with aclosing(stream.__aiter__()) as chunks:
+            async for chunk in chunks:
+                assert_type(chunk.delta, str)
+                print(chunk.delta, end='')
+                if chunk.delta.endswith('.'):
+                    break
+        print(stream.error)
+        text = await stream.text()
+        await stream.cancel()
+        print(text)
+"""
+
+
+def test_the_readmes_async_stream_example_type_checks_under_pyright_strict(tmp_path: Path) -> None:
+    # `aclosing(stream.__aiter__())` needs an async generator (it has aclose()), not just an async iterator
+    snippet = tmp_path / 'stream_snippet.py'
+    snippet.write_text(STREAM_SNIPPET, encoding='utf-8')
+    run = subprocess.run(
+        [sys.executable, '-m', 'pyright', '--outputjson', '--pythonpath', sys.executable, str(snippet)],
+        capture_output=True,
+        text=True,
+        cwd=ROOT,
+        check=False,
+    )
+    report = json.loads(run.stdout)
+    errors = [d for d in report['generalDiagnostics'] if d['severity'] == 'error']
+    assert errors == [], errors
+
+
 def test_the_issued_key_type_has_the_generated_keys_with_a_secret_api_key() -> None:
     from meridian._generated import admin as generated
     from meridian.admin import IssuedKey, Secret
@@ -193,7 +235,7 @@ def test_meridian_imports_without_typing_extensions() -> None:
         "            raise ImportError('typing_extensions is blocked')\n"
         'sys.meta_path.insert(0, Block())\n'
         "sys.modules.pop('typing_extensions', None)\n"
-        'import meridian\n'
+        'import meridian, meridian.admin, meridian.forward\n'
         "assert 'meridian._generated.public' not in sys.modules\n"
     )
     result = subprocess.run([sys.executable, '-c', code], capture_output=True, text=True, cwd=ROOT, check=False)

@@ -225,6 +225,47 @@ async def test_a_closed_http_client_of_the_callers_is_an_error_value_never_a_rai
 
 
 @pytest.mark.fake_only
+async def test_closing_a_client_over_the_callers_open_http_client_still_refuses_every_call(
+    mode: str, engine: Any
+) -> None:
+    # The SDK's own flag does the refusing: the caller's httpx client stays open (the SDK does not own it)
+    transport: Any = engine.transport
+    http: Any = httpx.Client(transport=transport) if mode == 'sync' else httpx.AsyncClient(transport=transport)
+    client: Any = (Meridian if mode == 'sync' else AsyncMeridian)(
+        engine.public_url, engine.project_key, http_client=http
+    )
+    await resolve(client.close() if mode == 'sync' else client.aclose())
+    assert client.is_closed and not http.is_closed
+    for result in [
+        await resolve(client.chat.create({'messages': MSG})),
+        await resolve(client.chat.stream({'messages': MSG})),
+        await resolve(client.models.list()),
+    ]:
+        assert facts(result) == CLOSED
+    assert engine.requests == []
+    await resolve(http.close() if mode == 'sync' else http.aclose())
+
+
+@pytest.mark.fake_only
+@pytest.mark.parametrize('options', [{'url': ''}, {'key': ''}], ids=['no-url', 'no-key'])
+async def test_a_refused_client_that_is_closed_says_it_is_closed(
+    mode: str, engine: Any, options: dict[str, Any]
+) -> None:
+    client = make_client(mode, engine, **options)
+    before = await resolve(client.models.list())
+    assert (before.error.code, before.error.message != CLOSED[3]) == ('invalid_request', True)
+    await resolve(client.close() if mode == 'sync' else client.aclose())
+    assert client.is_closed
+    for result in [
+        await resolve(client.chat.create({'messages': MSG})),
+        await resolve(client.chat.stream({'messages': MSG})),
+        await resolve(client.models.list()),
+    ]:
+        assert facts(result) == CLOSED
+    assert engine.requests == []
+
+
+@pytest.mark.fake_only
 @pytest.mark.parametrize('text', ['[1, 2]', '"str"', '1', 'true'])
 async def test_a_models_reply_that_is_not_an_object_is_a_network_error(mode: str, engine: Any, text: str) -> None:
     engine.next(Scripted(text=text, headers={'x-request-id': 'req_models'}))

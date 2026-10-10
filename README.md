@@ -75,6 +75,7 @@ A client built with a missing or malformed URL or key (or with both `http_client
 answers every call with an `invalid_request` error of type `client_error` and sends nothing. So does a closed client
 (`client.is_closed`, after `close()` / `aclose()` or its `with` block), and a client whose own `http_client` you
 closed: the message is "The client is closed.". The shared clients the forwarding routes use are rebuilt after a close.
+Don't close a shared client while it is serving requests: closing it ends the calls and streams in flight.
 
 What may raise: building a forwarding helper without a callable `authorize` (or with an unusable `response_type`, or an
 async function as an async view's `client`) raises `TypeError`; Python itself (wrong argument types); and
@@ -94,9 +95,9 @@ if opened.error is None:
 ```
 
 `stream.text()` reads the whole stream and returns a `Result[str]`. `stream.cancel()` stops it and closes the
-connection; the stream's error is then `aborted`. A stream is read once (with `for`, `text()` or `iter_bytes()`): any
-second read gives nothing and records `aborted` ("The stream was already read."), so `text()` answers an `Err`, never
-an empty success. Async:
+connection; the stream's error is then `aborted`. A stream is read once (with `for`, `text()` or `iter_bytes()`): a
+second read records `aborted` ("The stream was already read."). Iterating gives no chunks, `text()` answers an `Err`
+(never an empty success), and `iter_bytes()` / `aiter_bytes()` give one error frame. Async:
 
 ```python
 from contextlib import aclosing
@@ -156,7 +157,7 @@ checker catches a misspelt code in `if result.error.code == 'rate_limited':`.
 - When a retry finds its key still in use (`idempotency_conflict`, 409) after an earlier attempt failed with anything
   but `rate_limited`, the earlier attempt's error is returned: that attempt reached the engine.
 - A buffered `chat.create` waits up to 300 seconds for its reply; streams and admin calls wait up to 60 seconds. These
-  are limits per read (and per connect), not on the whole call: a stream that keeps sending runs as long as it sends,
+  are limits per connect, read, write and pool wait, not on the whole call: a stream that keeps sending runs as long as it sends,
   and a call that is retried waits again on each attempt. `timeout=` (seconds) on the client sets one such limit for
   every call. Invalid values of `timeout` and `max_retries`
   (negative, NaN, infinite, `bool`) fall back to the defaults.

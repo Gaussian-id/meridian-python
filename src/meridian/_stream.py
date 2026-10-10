@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncGenerator, AsyncIterator, Generator, Iterator, Mapping
+from collections.abc import AsyncGenerator, Generator, Iterator, Mapping
 from dataclasses import dataclass, replace
 from typing import Any, Literal, cast
 
@@ -279,7 +279,7 @@ class AsyncChatStream:
         for data in decoder.close():
             yield data
 
-    async def __aiter__(self) -> AsyncIterator[ChatChunk]:
+    async def __aiter__(self) -> AsyncGenerator[ChatChunk, None]:
         # [1] A stream is read once
         state = self._state
         if not state.begin():

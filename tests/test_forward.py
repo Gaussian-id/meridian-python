@@ -1541,18 +1541,18 @@ async def test_aclose_while_a_read_is_waiting_never_raises_and_closes_upstream(e
 
 
 class _SlowClose(httpx.AsyncByteStream):
-    """An engine stream that sends one frame and then waits; closing it takes a checkpoint (`forever`: it never ends),
-    as closing a connection does."""
+    """An engine stream that sends one frame and then waits; closing it takes `seconds` (at least a checkpoint), as
+    closing a connection does."""
 
-    def __init__(self, forever: bool = False) -> None:
-        self.forever, self.closed = forever, False
+    def __init__(self, seconds: float = 0) -> None:
+        self.seconds, self.closed = seconds, False
 
     async def __aiter__(self) -> AsyncIterator[bytes]:
         yield frame(chunk('a')).encode()
         await anyio.sleep_forever()
 
     async def aclose(self) -> None:
-        await (anyio.sleep_forever() if self.forever else anyio.sleep(0))
+        await anyio.sleep(self.seconds)
         self.closed = True
 
 
@@ -1577,14 +1577,32 @@ async def test_a_relay_closed_inside_a_cancelled_scope_still_closes_upstream(eng
     assert held.closed
 
 
-async def test_the_relays_close_is_bounded(engine: Any) -> None:
-    held = _SlowClose(forever=True)
+async def test_the_relays_close_is_bounded(engine: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The bound is patched small and the slow close is finite, so an unbounded relay finishes late and fails the
+    # assertions instead of hanging the suite
+    monkeypatch.setattr('meridian.forward.CLOSE_WITHIN', 0.2)
+    held = _SlowClose(seconds=2)
     body = await slow_stream_body(engine, held)
     assert await body.__anext__() == frame(chunk('a')).encode()
     started = anyio.current_time()
-    with anyio.fail_after(8):  # an unbounded close fails here instead of hanging the suite
-        await body.aclose()
-    assert anyio.current_time() - started < 8 and not held.closed  # given up after 5 s
+    await body.aclose()
+    assert anyio.current_time() - started < 1 and not held.closed  # given up after the bound, not after 2 s
+
+
+@pytest.mark.parametrize('cancels', [1, 2], ids=['once', 'again-during-the-close'])
+async def test_a_relay_cancelled_natively_during_aclose_still_closes_upstream(engine: Any, cancels: int) -> None:
+    # asyncio's own `task.cancel()` is edge-triggered and lands inside the close at its first checkpoint, where a
+    # shield of anyio's does not hold it: the close runs as a task of its own, and the cancellation is raised after
+    held = _SlowClose(seconds=0.2)
+    body = await slow_stream_body(engine, held)
+    assert await body.__anext__() == frame(chunk('a')).encode()
+    closing = asyncio.ensure_future(body.aclose())
+    for _ in range(cancels):
+        await asyncio.sleep(0.05)  # the close is under way
+        closing.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await closing
+    assert held.closed
 
 
 class _BlockingStream(httpx.SyncByteStream):

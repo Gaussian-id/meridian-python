@@ -190,6 +190,7 @@ class FakeEngine:
         self.requests.clear()
         self._queue.clear()
         self._bodies.clear()
+        self.hanging.clear()
 
     def upstream_closed(self) -> bool:
         """True when the client has closed every streamed response it opened (and opened at least one)."""

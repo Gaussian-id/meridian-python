@@ -7,6 +7,7 @@ credit is ever shown to the browser.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import inspect
 import json
@@ -670,8 +671,33 @@ async def _arelay(stream: AsyncChatStream) -> AsyncGenerator[bytes, None]:
     finally:
         # [3] Finished, failed, cancelled, or abandoned by the browser: upstream is closed, shielded (a cancelled scope
         #     would stop the close at its first checkpoint) and bounded (a close that hangs is given up)
+        await _close_shielded(upstream)
+
+
+async def _close_shielded(upstream: AsyncGenerator[bytes, None]) -> None:
+    # Under anyio's own scopes the shield is enough. A native `task.cancel()` on asyncio lands inside the close at its
+    # first checkpoint whatever the scope: the close then runs as a task of its own, shielded, and the cancellation
+    # (the first one; any later one only waits) is raised once the close is done or given up
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:  # another backend (trio)
         with anyio.move_on_after(CLOSE_WITHIN, shield=True):
             await upstream.aclose()
+        return
+    closing = asyncio.ensure_future(upstream.aclose())
+    cancelled: asyncio.CancelledError | None = None
+    with anyio.move_on_after(CLOSE_WITHIN, shield=True) as scope:
+        while not closing.done():
+            try:
+                await asyncio.shield(closing)
+            except asyncio.CancelledError as exc:
+                if scope.cancel_called:  # the bound, not a caller
+                    break
+                cancelled = cancelled or exc
+    if not closing.done():
+        closing.cancel()
+    if cancelled is not None:
+        raise cancelled
 
 
 class _Body:
