@@ -104,6 +104,8 @@ async with AsyncMeridian() as client:
 `client.models.list()` lists the models. The SDK never fills in a model: without one the engine chooses
 (`meridian/auto`). Request and reply types are in `gauss_meridian.types` (`ChatParams`, `ChatCompletion`, ...).
 
+To request a reasoning effort, set `model` to `meridian/auto:low` or append `:<effort>` to a named model. Efforts are case-sensitive: `low`, `medium`, `high`, `xhigh`, `max`. Browser forwarding drops `model` by default; allow it explicitly with `AllowRule(model=True)` or include the exact suffixed string in its model allowlist.
+
 ## Three ways to connect
 
 1. **The server client** (`Meridian` / `AsyncMeridian`): your server calls the engine with a project key (`gmr_...`).
